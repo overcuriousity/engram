@@ -55,6 +55,17 @@ pub struct HitExplanation {
     /// Set for a hit the association stage appended; every other field is then absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recalled_via: Option<String>,
+    /// A past query this note answered, which matched this one; see `core::trails`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<TrailEffect>,
+}
+
+/// The trail that found or lifted a hit, and where the reorder moved it. Not the trail's words:
+/// whoever typed them, the hit is shown to every member.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TrailEffect {
+    pub similarity: f32,
+    pub moved: StageEffect,
 }
 
 impl HitExplanation {

@@ -21,7 +21,9 @@ pub fn candidates(
     tried: &[crate::store::generations::GenerationParams],
     budget: usize,
 ) -> Vec<RankingParams> {
-    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS, PRIME_LIFTS, SITTING_PRIMES};
+    use crate::core::ranking::{
+        HALF_LIVES, MULTIPLIERS, PRIME_LIFTS, SITTING_PRIMES, TRAIL_WEIGHTS,
+    };
     let recency = outward(
         &RECENCY,
         |v| *v < current.recency_weight,
@@ -48,6 +50,11 @@ pub fn candidates(
         |v| *v < current.prime_lift,
         |v| *v == current.prime_lift,
     );
+    let trails = outward(
+        &TRAIL_WEIGHTS,
+        |v| *v < current.trail_weight,
+        |v| *v == current.trail_weight,
+    );
     // The sitting shares the lift's budget, so turning it on under a zero lift is a sure tie.
     // Turning it off is offered whatever the lift, so an adopted sitting can always be undone.
     let sittings: Vec<bool> = match current.sitting_prime || current.prime_lift > 0 {
@@ -66,6 +73,7 @@ pub fn candidates(
         multipliers.len(),
         half_lives.len(),
         lifts.len(),
+        trails.len(),
         sittings.len(),
     ]
     .into_iter()
@@ -99,6 +107,12 @@ pub fn candidates(
         if let Some(prime_lift) = lifts.get(i) {
             out.push(RankingParams {
                 prime_lift: *prime_lift,
+                ..current
+            });
+        }
+        if let Some(trail_weight) = trails.get(i) {
+            out.push(RankingParams {
+                trail_weight: *trail_weight,
                 ..current
             });
         }
@@ -178,6 +192,7 @@ fn moved(cand: RankingParams, current: RankingParams) -> usize {
         + usize::from(cand.candidate_multiplier != current.candidate_multiplier)
         + usize::from(cand.recency_half_life_days != current.recency_half_life_days)
         + usize::from(cand.prime_lift != current.prime_lift)
+        + usize::from(cand.trail_weight != current.trail_weight)
         + usize::from(cand.spread_max != current.spread_max)
         + usize::from(cand.rerank != current.rerank)
         + usize::from(cand.review_min != current.review_min)
@@ -361,17 +376,24 @@ pub(crate) async fn evidence_pairs(core: &Core, generation_id: &str) -> Result<(
     // After the person's: an unjudged search adds the note the model expects, and only then.
     let room = OBSERVATION_LIMIT.saturating_sub(verdicts.len());
     if room > 0 && core.labels_count().await? {
+        let relevant_at = crate::jobs::label::relevant_at(core).await?;
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        let model = core.decider.model();
         verdicts.extend(
             core.store
-                .model_judged_pairs(
-                    generation_id,
-                    crate::jobs::label::relevant_at(core).await?,
-                    crate::core::judging::catalogue::answers_query("").version,
-                    core.decider.model(),
-                    room,
-                )
+                .model_judged_pairs(generation_id, relevant_at, version, model, room)
                 .await?,
         );
+        // Then what a deep look found that the search left out: a search the labels already
+        // gave a pair counts once.
+        let room = OBSERVATION_LIMIT.saturating_sub(verdicts.len());
+        let paired: std::collections::HashSet<String> =
+            verdicts.iter().map(|p| p.event_id.clone()).collect();
+        let found = core
+            .store
+            .deep_found_pairs(generation_id, relevant_at, version, model, room)
+            .await?;
+        verdicts.extend(found.into_iter().filter(|p| !paired.contains(&p.event_id)));
     }
     let confirmed: std::collections::HashSet<(String, String)> = verdicts
         .iter()
@@ -1004,8 +1026,8 @@ mod tests {
     #[tokio::test]
     async fn an_unjudged_search_counts_only_while_the_model_agrees_with_the_person() {
         // 30 judged searches at hit rate 0.9, selectivity 0.2 -> the unjudged search adds a pair; at
-        // hit rate 0.8 it does not; at 29 judged it does not
-        for (hits, misses, counts) in [(27, 3, true), (24, 6, false), (27, 2, false)] {
+        // hit rate 0.8 it does not; with 29 judged the verdicts cannot yet stop it
+        for (hits, misses, counts) in [(27, 3, true), (24, 6, false), (27, 2, true)] {
             let (core, order) = seeded().await;
             let generation = a_generation(&core).await;
             for _ in 0..hits {
@@ -1034,6 +1056,40 @@ mod tests {
                 .count();
             assert_eq!(model_pair, usize::from(counts));
         }
+    }
+
+    #[tokio::test]
+    async fn a_deep_find_for_an_unjudged_search_is_a_pair_the_sweep_scores() {
+        use crate::store::deep_looks::{DeepKind, DeepSource};
+        let (core, order) = seeded().await;
+        let generation = a_generation(&core).await;
+        for _ in 0..27 {
+            labelled_search(&core, &order, Some(0), &[0]).await;
+        }
+        // Nothing the search showed was relevant; a deep look found a note it left out.
+        let id = labelled_search(&core, &order, None, &[]).await;
+        let found = order.last().unwrap().clone();
+        let s = DeepSource {
+            kind: DeepKind::Labelled,
+            id,
+        };
+        core.store
+            .put_deep_look(
+                &s,
+                &[(found.clone(), 0.95)],
+                crate::core::judging::catalogue::answers_query("").version,
+                core.decider.model(),
+            )
+            .await
+            .unwrap();
+        assert!(core.labels_count().await.unwrap());
+        let (pairs, _) = evidence_pairs(&core, &generation).await.unwrap();
+        assert_eq!(pairs.len(), 28);
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.satisfies.contains(&found) && p.served_rank.is_none())
+        );
     }
 
     #[tokio::test]
@@ -1424,6 +1480,23 @@ mod tests {
     }
 
     #[test]
+    fn the_trail_weight_walks_its_ladder_one_knob_at_a_time() {
+        let current = RankingParams::default();
+        let out = candidates(current, &[], 20);
+        for w in [0.0, 1.0] {
+            let c: Vec<_> = out.iter().filter(|c| c.trail_weight == w).collect();
+            assert_eq!(c.len(), 1, "{out:?}");
+            assert_eq!(
+                *c[0],
+                RankingParams {
+                    trail_weight: w,
+                    ..current
+                }
+            );
+        }
+    }
+
+    #[test]
     fn every_candidate_moves_at_most_one_knob() {
         let current = RankingParams::default();
         let all = candidates(current, &[], 64);
@@ -1444,6 +1517,7 @@ mod tests {
                 + (crate::core::ranking::MULTIPLIERS.len() - 1)
                 + (crate::core::ranking::HALF_LIVES.len() - 1)
                 + (crate::core::ranking::PRIME_LIFTS.len() - 1)
+                + (crate::core::ranking::TRAIL_WEIGHTS.len() - 1)
                 + 1,
             "every rung on every ladder, once, and nothing off them"
         );

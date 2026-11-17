@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT e.weak AS \"weak!: i64\",\n                      (SELECT MAX(d.yes) FROM decide_evidence v\n                         JOIN deep_looks d ON d.source_id = v.event_id\n                                          AND d.artifact_id = v.artifact_id\n                        WHERE v.event_id = e.id AND v.joint = 1\n                          AND d.source_kind = CASE e.weak WHEN 0 THEN 'second_reading'\n                                                          ELSE 'decide' END\n                          AND d.question_version = ? AND d.model = ?) AS \"top: f64\"\n                 FROM decide_events e\n                WHERE e.decider = ? AND e.created_at > ? AND COALESCE(e.bears_version, 1) = ?\n                  AND e.not_held = 0 AND e.verdict IS NULL\n                  AND EXISTS (SELECT 1 FROM deep_looks d\n                               WHERE d.source_id = e.id AND d.artifact_id = ''\n                                 AND d.question_version = ? AND d.model = ?\n                                 AND d.source_kind = CASE e.weak WHEN 0 THEN 'second_reading'\n                                                                 ELSE 'decide' END)",
+  "describe": {
+    "columns": [
+      {
+        "name": "weak!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "weak"
+          }
+        }
+      },
+      {
+        "name": "top: f64",
+        "ordinal": 1,
+        "type_info": "Null",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "781c99d90b5af5b4de980a4f0072db8398fd013b7a7a0d1655c2e959a5e2cd28"
+}

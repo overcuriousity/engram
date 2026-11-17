@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decide_events SET weak = 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f70fab80f9cc3ce48903c382e93a944281518e83aa2464840dea3ec263dd4171"
+}

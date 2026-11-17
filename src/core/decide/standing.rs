@@ -81,6 +81,14 @@ pub fn standing(
     }
 }
 
+/// Loose matches cannot settle a verdict, however sure the joint read is.
+pub fn capped(s: Standing, weak: bool) -> Standing {
+    match s {
+        Standing::Settled if weak => Standing::Leaning,
+        s => s,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

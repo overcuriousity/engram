@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", query AS \"query!\" FROM trails\n                WHERE retired_at IS NULL AND embed_model != ?\n                ORDER BY created_at, id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "query"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "5e16f378b6a30a9d9007ab57d082ba49a2827cb7e298179bcf0394223743a20f"
+}

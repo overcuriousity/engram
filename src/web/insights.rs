@@ -21,12 +21,34 @@ struct Retrieval {
     mrr: String,
     /// Rendered `|safe`: built here, its only variable part a count.
     note: String,
-    /// Retrieval by the model's labels and how far they agree with the person; empty before any.
+    /// Retrieval by the model's labels and how far they agree with the person, then the trails; empty before any.
     by_model: Vec<String>,
 }
 
 fn searches(n: usize) -> String {
     format!("{n} search{}", if n == 1 { "" } else { "es" })
+}
+
+/// Absent before any deep look.
+fn deep_line(looks: i64, found: i64) -> Option<String> {
+    (looks > 0).then(|| format!("deep looks: {looks} · {found} found a note search had missed"))
+}
+
+/// Absent with no live trail.
+fn trail_line(t: &crate::store::trails::TrailCounts) -> Option<String> {
+    (t.live > 0).then(|| {
+        let mut s = format!(
+            "trails: {} on {} notes · {} by you",
+            t.live, t.notes, t.by_person
+        );
+        if t.found_through > 0 {
+            s.push_str(&format!(
+                " · {} searches found a note through one",
+                t.found_through
+            ));
+        }
+        s
+    })
 }
 
 /// The lines under the person's figures; a line with nothing to say is left out. The bearing record
@@ -64,9 +86,14 @@ fn model_lines(f: &crate::jobs::label::Figures) -> Vec<String> {
     }
     if labelled {
         out.push(
-            match f.counts {
-                true => "model labels count toward sweeps",
-                false => "model labels are shown only",
+            match f.stopped {
+                None => "model labels count toward sweeps",
+                Some(crate::jobs::label::Stopped::ByThePerson) => {
+                    "model labels are stopped: they disagree with your verdicts"
+                }
+                Some(crate::jobs::label::Stopped::BySelectivity) => {
+                    "model labels are stopped: the model calls too much relevant"
+                }
             }
             .into(),
         );
@@ -758,7 +785,18 @@ async fn page(
                     .store
                     .feedback_stats(tenant.core.weak_below())
                     .await?;
-                let by_model = model_lines(&tenant.core.label_figures().await?);
+                let mut by_model = model_lines(&tenant.core.label_figures().await?);
+                by_model.extend(trail_line(&tenant.core.store.trail_counts().await?));
+                let (looks, found) = tenant
+                    .core
+                    .store
+                    .deep_counts(
+                        crate::jobs::label::relevant_at(&tenant.core).await?,
+                        crate::core::judging::catalogue::answers_query("").version,
+                        tenant.core.decider.model(),
+                    )
+                    .await?;
+                by_model.extend(deep_line(looks, found));
                 match f.judged {
                     0 => Retrieval {
                         recall_at_10: "—".into(),
@@ -940,7 +978,7 @@ pub(crate) struct EvolveView {
     rules: Option<String>,
     /// One per line the judge is held to in this era, with when and why it last moved.
     lines: Vec<String>,
-    /// What would move Decide's `split_at` and `bears_min`, which nothing moves.
+    /// What Decide's verdicts say beside its lines; `split_at` is the one nothing moves.
     shares: Vec<String>,
 }
 
@@ -986,12 +1024,23 @@ async fn judgement_lines(core: &crate::core::Core) -> Result<(Vec<String>, Vec<S
         core.settled_at().await,
         since(m)
     ));
+    let id = crate::core::decide::BEARS_ID;
+    let m = core
+        .store
+        .last_threshold_move(id, &crate::core::decide::settled_era(model))
+        .await?;
+    lines.push(format!(
+        "{id} · bears {:.2} · {}",
+        core.bears_at().await,
+        since(m)
+    ));
     let d = core.store.decide_shares(model).await?;
     let share = |name: &str, (n, hit): (usize, usize)| format!("{name}: {hit} of {n}");
     let shares = vec![
         share("split and right", d.split),
         share("held and \"nothing here\"", d.held),
         share("not held and wrong", d.not_held),
+        share("weak and right", d.weak),
     ];
     Ok((lines, shares))
 }
@@ -1046,12 +1095,13 @@ async fn rules_str(core: &crate::core::Core) -> Result<Option<String>> {
 
 fn params_str(p: &crate::store::generations::GenerationParams) -> String {
     format!(
-        "recency {:.2}, cap {}, pool ×{}, half-life {}d, lift {}, sitting {}, spread {}, rerank {}, review {:.2}",
+        "recency {:.2}, cap {}, pool ×{}, half-life {}d, lift {}, trails {:.1}, sitting {}, spread {}, rerank {}, review {:.2}",
         p.recency_weight,
         cap_str(p.per_source_cap),
         p.candidate_multiplier,
         p.recency_half_life_days,
         p.prime_lift,
+        p.trail_weight,
         if p.sitting_prime { "on" } else { "off" },
         p.spread_max,
         if p.rerank { "on" } else { "off" },
@@ -1494,11 +1544,45 @@ mod tests {
             html.contains("agreement: hit rate 1.00 · selectivity 0.50 over 1 judged search"),
             "{html}"
         );
-        assert!(html.contains("model labels are shown only"), "{html}");
+        assert!(html.contains("model labels count toward sweeps"), "{html}");
         assert!(
             !html.contains("bears held up"),
             "nothing ruled on yet: {html}"
         );
+    }
+
+    #[tokio::test]
+    async fn insights_counts_trails() {
+        use crate::store::trails::{NewTrail, TrailSource};
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let new = vec![crate::store::artifacts::NewArtifact {
+            text: "alpha line".into(),
+            ..Default::default()
+        }];
+        let id = core.store.insert_artifacts(&src.id, &new).await.unwrap()[0]
+            .id
+            .clone();
+        let html = insights(core.clone()).await;
+        assert!(!html.contains("trails:"), "{html}");
+        core.store
+            .mint_trail(
+                &NewTrail {
+                    artifact_id: &id,
+                    query: "q",
+                    query_vec: &[1.0, 0.0],
+                    embed_model: "fake",
+                    source: TrailSource::Ask,
+                    source_id: "s1",
+                },
+                8,
+                20000,
+            )
+            .await
+            .unwrap();
+        let html = insights(core).await;
+        assert!(html.contains("trails: 1 on 1 notes · 1 by you"), "{html}");
     }
 
     #[tokio::test]
@@ -1767,7 +1851,7 @@ mod tests {
 
         let body = insights(core).await;
         let today = chrono::Utc::now().format("%Y-%m-%d");
-        assert!(body.contains("judgement lines (4)"), "{body}");
+        assert!(body.contains("judgement lines (5)"), "{body}");
         assert!(
             body.contains(&format!(
                 "pair_relation · act 0.92 · ask 0.60 · moved {today}: {reason}"
@@ -1786,7 +1870,12 @@ mod tests {
             body.contains("decide_settled · settled 0.80 · as configured"),
             "{body}"
         );
+        assert!(
+            body.contains("decide_bears · bears 0.50 · as configured"),
+            "{body}"
+        );
         assert!(!body.contains("elsewhere"), "{body}");
+        assert!(body.contains("weak and right: 0 of 0"), "{body}");
         assert!(body.contains("split and right: 1 of 2"), "{body}");
         assert!(
             body.contains("held and &#34;nothing here&#34;: 1 of 3"),

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT refused FROM deep_look_failures WHERE source_kind = ? AND source_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "refused",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deep_look_failures",
+            "name": "refused"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9337373f51ba864276937159af049c33acf96a22e9fb8a728d30bc188100e984"
+}

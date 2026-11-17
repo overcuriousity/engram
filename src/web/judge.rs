@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(r["agreement"]["judged"], 0);
         assert!(r["agreement"]["hit_rate"].is_null());
         assert_eq!(r["bears"]["ruled_on"], 0);
-        assert_eq!(r["labels_count"], false);
+        assert_eq!(r["labels_count"], true);
     }
 
     #[tokio::test]

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE trails SET query_vec = ?, vec_dim = ?, embed_model = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "8a8c7b5e8904cb21725e5af7bd47b41cc5cf5cbb10aeb1527dbc9917ab98b6d1"
+}

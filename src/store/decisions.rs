@@ -31,6 +31,8 @@ pub struct NewDecision {
     pub prior: String,
     pub standing: String,
     pub not_held: bool,
+    /// Nothing reached the line; the closest were weighed.
+    pub weak: bool,
     /// As the server named itself.
     pub model: String,
     /// The configured decision model.
@@ -61,6 +63,7 @@ pub struct StoredDecision {
     pub answers: Option<String>,
     pub standing: String,
     pub not_held: bool,
+    pub weak: bool,
     pub created_at: i64,
     pub verdict: Option<AskVerdict>,
     pub correct: Option<String>,
@@ -72,7 +75,7 @@ fn vec_to_blob(v: &[f32]) -> Vec<u8> {
 }
 
 impl Store {
-    /// A held decision's joint evidence is observed as cited, as an ask's used citations are.
+    /// A held decision's joint evidence is observed as cited, as an ask's used citations are; a weak one's is not.
     pub async fn record_decision(&self, d: NewDecision) -> Result<String> {
         // Read before the transaction opens, so the write lock is not held across another table.
         let generation = self.live_generation().await?;
@@ -82,8 +85,8 @@ impl Store {
             "INSERT INTO decide_events
                (id, question, questions, situation, scope, filters, answers, prior, standing,
                 not_held, model, decider, read, dropped, query_vec, vec_dim, embed_model, created_at,
-                bears_version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                bears_version, weak)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &id,
             &d.question,
             &d.questions,
@@ -102,7 +105,8 @@ impl Store {
             d.query_vec.len() as i64,
             &d.embed_model,
             now(),
-            crate::core::decide::state::BEARS_VERSION
+            crate::core::decide::state::BEARS_VERSION,
+            d.weak as i64
         )
         .execute(&mut *tx)
         .await?;
@@ -125,6 +129,7 @@ impl Store {
             if let Some(g) = &generation
                 && e.joint
                 && !d.not_held
+                && !d.weak
             {
                 crate::store::observations::insert(
                     &mut *tx,
@@ -148,8 +153,8 @@ impl Store {
 
     pub async fn decision(&self, id: &str) -> Result<Option<StoredDecision>> {
         let Some(r) = sqlx::query!(
-            r#"SELECT id AS "id!", question, questions, answers, standing, not_held, created_at,
-                      verdict, correct
+            r#"SELECT id AS "id!", question, questions, answers, standing, not_held, weak,
+                      created_at, verdict, correct
                  FROM decide_events WHERE id = ?"#,
             id
         )
@@ -183,6 +188,7 @@ impl Store {
             answers: r.answers,
             standing: r.standing,
             not_held: r.not_held != 0,
+            weak: r.weak != 0,
             created_at: r.created_at,
             verdict: r.verdict.as_deref().and_then(AskVerdict::parse),
             correct: r.correct,
@@ -255,18 +261,125 @@ pub struct DecideShares {
     pub held: (usize, usize),
     /// Not held, and of those judged wrong.
     pub not_held: (usize, usize),
+    /// Weak, and of those judged right.
+    pub weak: (usize, usize),
+}
+
+/// What the verdicts say about Decide's bearing line since it last moved.
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub struct BearsEvidence {
+    /// Not weak, judged "nothing here": the line let notes in that bore nothing.
+    pub too_low: usize,
+    /// Weak, judged right: a note that answered was left under the line.
+    pub too_high: usize,
+    /// Not weak and right, or weak and "nothing here": the line did its work.
+    pub fine: usize,
+}
+
+impl BearsEvidence {
+    pub fn n(&self) -> usize {
+        self.too_low + self.too_high + self.fine
+    }
+}
+
+/// One decision as the tuner and Insights read it.
+struct DecideRow {
+    held: bool,
+    weak: bool,
+    /// The first question's standing.
+    standing: Option<String>,
+    verdict: Option<AskVerdict>,
 }
 
 impl Store {
+    /// `model`'s decisions since the bearing line last moved, judged "right" or "nothing here"
+    /// (a `wrong` verdict does not say where the line was, nor does a decision nothing held).
+    pub async fn bears_verdicts(&self, model: &str) -> Result<BearsEvidence> {
+        let era = crate::core::decide::settled_era(model);
+        let since = self
+            .moved_at(crate::core::decide::BEARS_ID, &era, false)
+            .await?;
+        let mut e = BearsEvidence::default();
+        for r in self.decides_since(model, since).await? {
+            match (r.held, r.weak, r.verdict) {
+                (true, false, Some(AskVerdict::NothingHere)) => e.too_low += 1,
+                (true, true, Some(AskVerdict::Right)) => e.too_high += 1,
+                (true, false, Some(AskVerdict::Right))
+                | (true, true, Some(AskVerdict::NothingHere)) => e.fine += 1,
+                _ => {}
+            }
+        }
+        Ok(e)
+    }
+
+    /// `bears_verdicts`, and when `with_readings` the unjudged held decisions since the line
+    /// moved that a deep look has read again (a second reading, or a weak one looked at as a
+    /// gap): what it said of their joint evidence stands in for a verdict. A verdict replaces it.
+    pub async fn bears_evidence(
+        &self,
+        model: &str,
+        relevant_at: f64,
+        ask_at: f64,
+        with_readings: bool,
+    ) -> Result<BearsEvidence> {
+        let mut e = self.bears_verdicts(model).await?;
+        if !with_readings {
+            return Ok(e);
+        }
+        let era = crate::core::decide::settled_era(model);
+        let since = self
+            .moved_at(crate::core::decide::BEARS_ID, &era, false)
+            .await?;
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        let rows = sqlx::query!(
+            r#"SELECT e.weak AS "weak!: i64",
+                      (SELECT MAX(d.yes) FROM decide_evidence v
+                         JOIN deep_looks d ON d.source_id = v.event_id
+                                          AND d.artifact_id = v.artifact_id
+                        WHERE v.event_id = e.id AND v.joint = 1
+                          AND d.source_kind = CASE e.weak WHEN 0 THEN 'second_reading'
+                                                          ELSE 'decide' END
+                          AND d.question_version = ? AND d.model = ?) AS "top: f64"
+                 FROM decide_events e
+                WHERE e.decider = ? AND e.created_at > ? AND COALESCE(e.bears_version, 1) = ?
+                  AND e.not_held = 0 AND e.verdict IS NULL
+                  AND EXISTS (SELECT 1 FROM deep_looks d
+                               WHERE d.source_id = e.id AND d.artifact_id = ''
+                                 AND d.question_version = ? AND d.model = ?
+                                 AND d.source_kind = CASE e.weak WHEN 0 THEN 'second_reading'
+                                                                 ELSE 'decide' END)"#,
+            version,
+            model,
+            model,
+            since,
+            crate::core::decide::state::BEARS_VERSION,
+            version,
+            model
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for r in rows {
+            // Read again and no joint note was asked about (gone, or too long): it says nothing.
+            let Some(top) = r.top else { continue };
+            match r.weak != 0 {
+                false if top < ask_at => e.too_low += 1,
+                true if top >= relevant_at => e.too_high += 1,
+                _ => e.fine += 1,
+            }
+        }
+        Ok(e)
+    }
+
     /// Held `settled` decisions of `model` made since Decide's line last moved, judged right or
     /// wrong: (judged, wrong).
     pub async fn settled_record(&self, model: &str) -> Result<(usize, usize)> {
         let rows = self.decides_since_move(model).await?;
+        // A weak decision stands at most "leaning", so it says nothing about the settled line.
         let settled = rows
             .iter()
-            .filter(|r| r.0 && r.1.as_deref() == Some("settled"));
+            .filter(|r| r.held && !r.weak && r.standing.as_deref() == Some("settled"));
         let judged: Vec<_> = settled
-            .filter_map(|r| r.2.filter(|v| *v != AskVerdict::NothingHere))
+            .filter_map(|r| r.verdict.filter(|v| *v != AskVerdict::NothingHere))
             .collect();
         let wrong = judged.iter().filter(|v| **v == AskVerdict::Wrong).count();
         Ok((judged.len(), wrong))
@@ -279,19 +392,28 @@ impl Store {
             .decides_since_move(model)
             .await?
             .iter()
-            .filter(|r| r.0 && r.1.as_deref() == Some("leaning"))
+            .filter(|r| r.held && !r.weak && r.standing.as_deref() == Some("leaning"))
             .count())
     }
 
     /// Every judged decision of `model` read under the wording of `bears` in force, for Insights.
     pub async fn decide_shares(&self, model: &str) -> Result<DecideShares> {
         let mut out = DecideShares::default();
-        for (held, standing, verdict) in self.decides_since(model, 0).await? {
+        for DecideRow {
+            held,
+            weak,
+            standing,
+            verdict,
+        } in self.decides_since(model, 0).await?
+        {
             let Some(v) = verdict else { continue };
             let count = |(n, hit): &mut (usize, usize), yes: bool| {
                 *n += 1;
                 *hit += usize::from(yes);
             };
+            if weak {
+                count(&mut out.weak, v == AskVerdict::Right);
+            }
             if held {
                 count(&mut out.held, v == AskVerdict::NothingHere);
                 if standing.as_deref() == Some("split") {
@@ -304,10 +426,7 @@ impl Store {
         Ok(out)
     }
 
-    async fn decides_since_move(
-        &self,
-        model: &str,
-    ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
+    async fn decides_since_move(&self, model: &str) -> Result<Vec<DecideRow>> {
         let era = crate::core::decide::settled_era(model);
         let since = self
             .moved_at(crate::core::decide::SETTLED_ID, &era, false)
@@ -315,15 +434,85 @@ impl Store {
         self.decides_since(model, since).await
     }
 
-    /// `model`'s decisions made after `since` in Decide's era, as (held, the first question's
-    /// standing, verdict): one read under another wording of `bears` is not comparable.
-    async fn decides_since(
+    /// Weak decisions a person called right, oldest first, whose vector is under the live embed
+    /// model and whose deep look is still owed in this era (`Store::deep_look_due`, not done).
+    pub async fn weak_right_decisions(
         &self,
+        embed_model: &str,
+        version: u32,
         model: &str,
-        since: i64,
-    ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let at = now();
+        Ok(sqlx::query_scalar!(
+            r#"SELECT e.id AS "id!" FROM decide_events e
+                WHERE e.weak = 1 AND e.verdict = 'right' AND e.embed_model = ? AND e.vec_dim > 0
+                  AND NOT EXISTS (SELECT 1 FROM deep_looks d
+                                   WHERE d.source_kind = 'weak_right' AND d.source_id = e.id
+                                     AND d.artifact_id = '' AND d.question_version = ?
+                                     AND d.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM deep_look_failures f
+                                   WHERE f.source_kind = 'weak_right' AND f.source_id = e.id
+                                     AND f.question_version = ? AND f.model = ?
+                                     AND (f.refused >= ? OR f.retry_at > ?))
+                ORDER BY e.created_at ASC, e.id ASC LIMIT ?"#,
+            embed_model,
+            version,
+            model,
+            version,
+            model,
+            crate::store::search_labels::LABEL_GIVE_UP,
+            at,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Unjudged, not weak, not `not_held`, under this decider and BEARS_VERSION, oldest first,
+    /// with the second reading still owed in this era.
+    pub async fn decisions_unread(
+        &self,
+        decider: &str,
+        embed_model: &str,
+        version: u32,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let (at, model) = (now(), decider);
+        Ok(sqlx::query_scalar!(
+            r#"SELECT e.id AS "id!" FROM decide_events e
+                WHERE e.verdict IS NULL AND e.weak = 0 AND e.not_held = 0
+                  AND e.decider = ? AND COALESCE(e.bears_version, 1) = ?
+                  AND e.embed_model = ? AND e.vec_dim > 0
+                  AND NOT EXISTS (SELECT 1 FROM deep_looks d
+                                   WHERE d.source_kind = 'second_reading' AND d.source_id = e.id
+                                     AND d.artifact_id = '' AND d.question_version = ?
+                                     AND d.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM deep_look_failures f
+                                   WHERE f.source_kind = 'second_reading' AND f.source_id = e.id
+                                     AND f.question_version = ? AND f.model = ?
+                                     AND (f.refused >= ? OR f.retry_at > ?))
+                ORDER BY e.created_at ASC, e.id ASC LIMIT ?"#,
+            decider,
+            crate::core::decide::state::BEARS_VERSION,
+            embed_model,
+            version,
+            model,
+            version,
+            model,
+            crate::store::search_labels::LABEL_GIVE_UP,
+            at,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// `model`'s decisions made after `since` in Decide's era: one read under another wording of
+    /// `bears` is not comparable.
+    async fn decides_since(&self, model: &str, since: i64) -> Result<Vec<DecideRow>> {
         let rows = sqlx::query!(
-            r#"SELECT questions, standing, not_held AS "not_held!: i64", verdict FROM decide_events
+            r#"SELECT questions, standing, not_held AS "not_held!: i64", weak AS "weak!: i64", verdict FROM decide_events
                 WHERE decider = ? AND created_at > ? AND COALESCE(bears_version, 1) = ?"#,
             model,
             since,
@@ -345,11 +534,12 @@ impl Store {
                         .as_str()
                         .map(str::to_string)
                 });
-                (
-                    r.not_held == 0,
+                DecideRow {
+                    held: r.not_held == 0,
+                    weak: r.weak != 0,
                     standing,
-                    r.verdict.as_deref().and_then(AskVerdict::parse),
-                )
+                    verdict: r.verdict.as_deref().and_then(AskVerdict::parse),
+                }
             })
             .collect())
     }
@@ -369,8 +559,34 @@ pub(crate) mod test_support {
         not_held: bool,
         verdict: AskVerdict,
     ) -> String {
+        judged_weak(store, decider, standing, not_held, false, verdict).await
+    }
+
+    /// `judged`, that weighed the closest notes under the line when `weak`.
+    pub(crate) async fn judged_weak(
+        store: &Store,
+        decider: &str,
+        standing: &str,
+        not_held: bool,
+        weak: bool,
+        verdict: AskVerdict,
+    ) -> String {
+        let id = unjudged(store, decider, standing, not_held, weak, &[]).await;
+        store.judge_decision(&id, verdict, None).await.unwrap();
+        id
+    }
+
+    /// `judged_weak` before any verdict, resting jointly on `joint`.
+    pub(crate) async fn unjudged(
+        store: &Store,
+        decider: &str,
+        standing: &str,
+        not_held: bool,
+        weak: bool,
+        joint: &[&str],
+    ) -> String {
         let q = crate::infer::decide::Question::noul("verdict", "Keep it?");
-        let id = store
+        store
             .record_decision(NewDecision {
                 question: "Keep it?".into(),
                 questions: crate::core::decide::wire::questions_json(std::slice::from_ref(&q)),
@@ -381,18 +597,29 @@ pub(crate) mod test_support {
                 prior: "{}".into(),
                 standing: serde_json::json!({ "verdict": standing }).to_string(),
                 not_held,
+                weak,
                 model: "as-reported".into(),
                 decider: decider.into(),
                 read: 0,
                 dropped: 0,
                 query_vec: vec![1.0],
                 embed_model: "fake".into(),
-                evidence: vec![],
+                evidence: joint
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, a)| NewEvidence {
+                        rank,
+                        artifact_id: (*a).into(),
+                        bears: 0.9,
+                        bearing: true,
+                        joint: true,
+                        n: Some(rank + 1),
+                        read: r#"{"verdict":"yes"}"#.into(),
+                    })
+                    .collect(),
             })
             .await
-            .unwrap();
-        store.judge_decision(&id, verdict, None).await.unwrap();
-        id
+            .unwrap()
     }
 }
 
@@ -426,6 +653,7 @@ mod tests {
             prior: r#"{"c":{"yes":0.5}}"#.into(),
             standing: r#"{"c":"settled"}"#.into(),
             not_held: false,
+            weak: false,
             model: "clef".into(),
             decider: "clef".into(),
             read: 3,
@@ -438,6 +666,89 @@ mod tests {
                 evidence(2, true, Some(2)),
             ],
         }
+    }
+
+    /// Four unjudged decisions a deep look read again, one it did not: (store, the first's id).
+    async fn read_again() -> (Store, String) {
+        use super::test_support::unjudged;
+        use crate::store::deep_looks::{DeepKind, DeepSource};
+        use crate::store::gaps::GapKind;
+        let s = Store::memory().await.unwrap();
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        let mut first = None;
+        for (weak, yes) in [(false, 0.2), (false, 0.9), (true, 0.9), (true, 0.2)] {
+            let id = unjudged(&s, "clef", "settled", false, weak, &["a"]).await;
+            let kind = match weak {
+                false => DeepKind::SecondReading,
+                true => DeepKind::Gap(GapKind::Decide),
+            };
+            let src = DeepSource {
+                kind,
+                id: id.clone(),
+            };
+            s.put_deep_look(&src, &[("a".into(), yes)], version, "clef")
+                .await
+                .unwrap();
+            first.get_or_insert(id);
+        }
+        unjudged(&s, "clef", "settled", false, false, &["a"]).await;
+        (s, first.unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_second_reading_stands_in_for_a_verdict_while_the_labels_count() {
+        let (s, _) = read_again().await;
+        let e = s.bears_evidence("clef", 0.7, 0.5, true).await.unwrap();
+        let want = BearsEvidence {
+            too_low: 1,
+            too_high: 1,
+            fine: 2,
+        };
+        assert_eq!(e, want);
+        let e = s.bears_evidence("clef", 0.7, 0.5, false).await.unwrap();
+        assert_eq!(e, BearsEvidence::default());
+    }
+
+    #[tokio::test]
+    async fn a_decision_read_again_does_not_stand_before_one_still_unread() {
+        let (s, _) = read_again().await;
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        // The two older ones are read; a window of one still reaches the third.
+        let owed = s
+            .decisions_unread("clef", "fake", version, 1)
+            .await
+            .unwrap();
+        assert_eq!(owed.len(), 1);
+        let src = crate::store::deep_looks::DeepSource {
+            kind: crate::store::deep_looks::DeepKind::SecondReading,
+            id: owed[0].clone(),
+        };
+        assert!(!s.deep_looked(&src, version, "clef").await.unwrap());
+        // Read and no joint note asked about: neither offered again nor counted as evidence.
+        let before = s.bears_evidence("clef", 0.7, 0.5, true).await.unwrap();
+        s.put_deep_look(&src, &[], version, "clef").await.unwrap();
+        let owed = s
+            .decisions_unread("clef", "fake", version, 1)
+            .await
+            .unwrap();
+        assert!(owed.is_empty());
+        let after = s.bears_evidence("clef", 0.7, 0.5, true).await.unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn a_verdict_replaces_the_second_reading_of_its_decision() {
+        let (s, first) = read_again().await;
+        s.judge_decision(&first, AskVerdict::Right, None)
+            .await
+            .unwrap();
+        let e = s.bears_evidence("clef", 0.7, 0.5, true).await.unwrap();
+        let want = BearsEvidence {
+            too_low: 0,
+            too_high: 1,
+            fine: 3,
+        };
+        assert_eq!(e, want);
     }
 
     #[tokio::test]
@@ -641,5 +952,21 @@ mod tests {
             1,
             "a decision the base did not hold cites nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn a_row_written_without_weak_reads_as_not_weak() {
+        let s = Store::memory().await.unwrap();
+        // The column list from before `weak` was kept.
+        sqlx::query!(
+            "INSERT INTO decide_events
+               (id, question, questions, prior, standing, not_held, model, read, dropped,
+                query_vec, vec_dim, embed_model, created_at)
+             VALUES ('old', 'Keep it?', '{}', '{}', '{}', 0, 'clef', 0, 0, x'', 0, 'fake', 0)"
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        assert!(!s.decision("old").await.unwrap().unwrap().weak);
     }
 }

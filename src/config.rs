@@ -37,6 +37,8 @@ pub struct Config {
     #[serde(default)]
     pub sitting: SittingConfig,
     #[serde(default)]
+    pub trails: TrailsConfig,
+    #[serde(default)]
     pub time: TimeConfig,
     #[serde(default)]
     pub reap: ReapConfig,
@@ -202,6 +204,10 @@ pub struct DecideConfig {
     pub settled_at: f64,
     /// The share of bearing held by passages against the verdict that splits it.
     pub split_at: f64,
+    /// The closest passages weighed when none reaches the bearing line.
+    pub weak_take: usize,
+    /// Notes a deep look asks about, at most.
+    pub deep_max: usize,
     /// When background judgement acts, asks or leaves; `[decide.bands.<id>]` overrides one question.
     pub bands: Bands,
     /// Open questions to a person, at most, before the judge stops asking.
@@ -298,6 +304,8 @@ impl Default for DecideConfig {
             bears_min: 0.5,
             settled_at: 0.80,
             split_at: 0.34,
+            weak_take: 3,
+            deep_max: 24,
             bands: Bands::default(),
             ask_open_max: 20,
             ask_lapse_days: 30,
@@ -432,6 +440,31 @@ impl Default for SittingConfig {
     fn default() -> Self {
         // Spelled out, not derived: `false` is a decision, documented on `prime`.
         Self { prime: false }
+    }
+}
+
+/// What a note was found for: the queries remembered against it, and how far they count.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TrailsConfig {
+    /// The starting rung of `trail_weight`; zero turns trails off.
+    pub weight: f32,
+    /// Similarity between a query and a trail's from which the trail matches.
+    pub match_at: f32,
+    /// Live trails a note keeps.
+    pub per_note: usize,
+    /// Live trails a base keeps.
+    pub max: usize,
+}
+
+impl Default for TrailsConfig {
+    fn default() -> Self {
+        Self {
+            weight: default_trail_weight(),
+            match_at: 0.80,
+            per_note: 8,
+            max: 20_000,
+        }
     }
 }
 
@@ -856,6 +889,14 @@ pub(crate) fn legacy_prime_lift() -> usize {
 }
 pub(crate) fn default_spread_max() -> usize {
     3
+}
+/// The shipped `trails.weight`: one place, as in `config.example.toml`.
+pub fn default_trail_weight() -> f32 {
+    0.5
+}
+/// What a generation row from before trails ran under: none.
+pub(crate) fn legacy_trail_weight() -> f32 {
+    0.0
 }
 /// The shipped `sitting.prime`: off, so an older generation row decodes as what it ran under.
 pub(crate) fn default_sitting_prime() -> bool {
@@ -1889,6 +1930,7 @@ impl Config {
                 resolve!("associate.spread_max", self.associate.spread_max, 0);
                 resolve!("associate.prime_lift", self.associate.prime_lift, 0);
                 resolve!("sitting.prime", self.sitting.prime, false);
+                resolve!("trails.weight", self.trails.weight, 0.0);
                 // Promotion is gated on a threshold, so "never" is one no activation reaches.
                 resolve!(
                     "promote.activation_above",
@@ -2047,6 +2089,31 @@ impl Config {
                 c.scan_min
             )));
         }
+        let t = &self.trails;
+        if !(0.0..=1.0).contains(&t.weight) {
+            return Err(ConfigError::Invalid(format!(
+                "trails.weight ({}) must be between 0 and 1; 0 turns trails off",
+                t.weight
+            )));
+        }
+        if !(t.match_at > 0.0 && t.match_at <= 1.0) {
+            return Err(ConfigError::Invalid(format!(
+                "trails.match_at ({}) must be above 0 and at most 1: it is a similarity",
+                t.match_at
+            )));
+        }
+        if !(1..=64).contains(&t.per_note) {
+            return Err(ConfigError::Invalid(format!(
+                "trails.per_note ({}) must be between 1 and 64",
+                t.per_note
+            )));
+        }
+        if t.max > 200_000 {
+            return Err(ConfigError::Invalid(format!(
+                "trails.max ({}) must be at most 200000; 0 keeps none",
+                t.max
+            )));
+        }
         self.infer
             .embed
             .templates()
@@ -2078,6 +2145,16 @@ impl Config {
             if !(0.0..=1.0).contains(&v) {
                 return Err(ConfigError::Invalid(format!(
                     "{key} ({v}) must be between 0 and 1: it is compared with a probability"
+                )));
+            }
+        }
+        for (key, v, max) in [
+            ("decide.weak_take", dc.weak_take, 8),
+            ("decide.deep_max", dc.deep_max, 50),
+        ] {
+            if !(1..=max).contains(&v) {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} ({v}) must be between 1 and {max}"
                 )));
             }
         }
@@ -2433,6 +2510,7 @@ impl Config {
             pursuit: PursuitConfig::default(),
             schedule: ScheduleConfig::default(),
             sitting: SittingConfig::default(),
+            trails: TrailsConfig::default(),
             time: TimeConfig::default(),
             reap: ReapConfig::default(),
             recommend: RecommendConfig::default(),
@@ -2986,6 +3064,19 @@ mode = "off"
                 .iter()
                 .any(|(k, _)| *k == "recommend.enabled")
         );
+    }
+
+    #[test]
+    fn trails_count_only_under_full_and_a_file_value_is_kept() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, &format!("{MINIMAL}\n[learn]\nmode = \"learning\"\n"));
+        assert_eq!(Config::load(Some(&p)).unwrap().trails.weight, 0.0);
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[learn]\nmode = \"learning\"\n[trails]\nweight = 1.0\n"),
+        );
+        assert_eq!(Config::load(Some(&p)).unwrap().trails.weight, 1.0);
     }
 
     #[test]
@@ -3554,6 +3645,10 @@ mode = "off"
             ("refuse_below = 1.5", "decide.refuse_below"),
             ("refuse_below = -0.1", "decide.refuse_below"),
             ("joint_tokens = 100", "decide.joint_tokens"),
+            ("weak_take = 0", "decide.weak_take"),
+            ("weak_take = 9", "decide.weak_take"),
+            ("deep_max = 0", "decide.deep_max"),
+            ("deep_max = 51", "decide.deep_max"),
         ] {
             let body = format!("{MINIMAL}\n[decide]\n{line}\n");
             match Config::load(Some(&write(&dir, &body))) {

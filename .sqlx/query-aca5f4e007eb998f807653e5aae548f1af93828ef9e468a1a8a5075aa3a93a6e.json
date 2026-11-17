@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", question, questions, answers, standing, not_held, created_at,\n                      verdict, correct\n                 FROM decide_events WHERE id = ?",
+  "query": "SELECT id AS \"id!\", question, questions, answers, standing, not_held, weak,\n                      created_at, verdict, correct\n                 FROM decide_events WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -70,8 +70,19 @@
         }
       },
       {
-        "name": "created_at",
+        "name": "weak",
         "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "weak"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 7,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -82,7 +93,7 @@
       },
       {
         "name": "verdict",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -93,7 +104,7 @@
       },
       {
         "name": "correct",
-        "ordinal": 8,
+        "ordinal": 9,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -114,9 +125,10 @@
       false,
       false,
       false,
+      false,
       true,
       true
     ]
   },
-  "hash": "6e253283730a064d4a7e6f2d6244f6b1be81f7c2bf1f09893dc73f2356d8a44b"
+  "hash": "aca5f4e007eb998f807653e5aae548f1af93828ef9e468a1a8a5075aa3a93a6e"
 }

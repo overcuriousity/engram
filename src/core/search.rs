@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
 use crate::store::feedback::{Door, Origin};
 use crate::vector::{SearchFilter, SearchHit};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const DEFAULT_LIMIT: usize = 10;
 pub const MAX_LIMIT: usize = 50;
@@ -426,10 +426,10 @@ fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<Option<f32>> {
     results.iter().map(|r| r.similarity).collect()
 }
 
-/// Flag every hit from the cliff on, without reordering: gaps are measured over sorted scores and
-/// the cut is carried back as a score, so what is marked stays a tail (`ask` truncates at the first
-/// mark).
-fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
+/// Flag every hit from the cliff on, without reordering: the cut is carried back as a score, so
+/// what is marked stays a tail (`ask` truncates at the first mark). A hit a trail found or lifted
+/// (`trailed`) is above the cut wherever its score falls.
+fn mark_past_cliff(results: &mut [SearchResult], reranked: bool, trailed: &HashSet<&str>) {
     let scored = cliff_scores(results, reranked);
     let mut sorted: Vec<f32> = scored.iter().flatten().copied().collect();
     sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
@@ -440,7 +440,8 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
     let cut = sorted[above - 1];
     let from = scored
         .iter()
-        .rposition(|s| s.is_some_and(|s| s >= cut))
+        .zip(results.iter())
+        .rposition(|(s, r)| s.is_some_and(|s| s >= cut) || trailed.contains(r.artifact_id.as_str()))
         .map_or(0, |i| i + 1);
     for r in results.iter_mut().skip(from) {
         r.past_cliff = true;
@@ -453,13 +454,17 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
 /// Retired notes to the tail, then the cliff read over the live prefix, then the tail marked with
 /// it. The marks must stay a suffix; a high-scoring retired row read with the rest would switch the
 /// cliff off.
-fn sink_retired_and_mark_the_cliff(results: &mut [SearchResult], reranked: bool) {
+fn sink_retired_and_mark_the_cliff(
+    results: &mut [SearchResult],
+    reranked: bool,
+    trailed: &HashSet<&str>,
+) {
     results.sort_by_key(|r| r.retired);
     let live = results
         .iter()
         .position(|r| r.retired)
         .unwrap_or(results.len());
-    mark_past_cliff(&mut results[..live], reranked);
+    mark_past_cliff(&mut results[..live], reranked, trailed);
     for r in results.iter_mut().filter(|r| r.retired) {
         r.past_cliff = true;
         if let Some(e) = r.explanation.as_mut() {
@@ -1351,6 +1356,11 @@ impl Core {
         };
         explanation.corpora_in_pool = cap_report.corpora_in_pool;
         explanation.displaced = cap_report.displaced;
+        // After the cap, so a trail's note neither displaces nor is displaced by it.
+        let (trailed, joining) = self
+            .trail_step(&vector, params.trail_weight, door, &filter, &hits)
+            .await;
+        let hits: Vec<crate::vector::SearchHit> = hits.into_iter().chain(joining).collect();
         let hit_counts = counts_of(&hits);
         let sims: HashMap<String, Option<f32>> = if self.learn.enabled && door.captured() {
             hits.iter()
@@ -1453,12 +1463,25 @@ impl Core {
             } else {
                 limit
             };
-            match reranker.rerank(&query.q, &docs, top_n).await {
+            // Asked for every row while a trail matched: a matched note it would cut is put back
+            // after the rows it kept, in its order.
+            let ask_n = match trailed.is_empty() {
+                true => top_n,
+                false => docs.len(),
+            };
+            match reranker.rerank(&query.q, &docs, ask_n).await {
                 Ok(order) => {
                     reranked = true;
                     results = order
                         .into_iter()
-                        .filter_map(|(idx, score)| {
+                        .enumerate()
+                        .filter(|(i, (idx, _))| {
+                            *i < top_n
+                                || results.get(*idx).is_some_and(|r| {
+                                    trailed.iter().any(|m| m.artifact_id == r.artifact_id)
+                                })
+                        })
+                        .filter_map(|(_, (idx, score))| {
                             results
                                 .get(idx)
                                 .map(|r| SearchResult { score, ..r.clone() })
@@ -1470,6 +1493,8 @@ impl Core {
                 Err(e) => tracing::warn!(error = %e, "rerank failed; returning vector order"),
             }
         }
+        // After the reranker, which scores query against text and would sink what a trail lifts.
+        crate::core::trails::apply(&mut results, &trailed, params.trail_weight);
 
         // Primed before capture and truncate, so the recorded pool is what the searcher saw; not on
         // `Ask` (its excerpt cut assumes rank order) or `Judge`. Due rows are read regardless of
@@ -1556,7 +1581,8 @@ impl Core {
         let explored = self.explore_swap(&mut results, q, limit, door, &origin);
 
         let visible = limit.min(results.len());
-        sink_retired_and_mark_the_cliff(&mut results[..visible], reranked);
+        let lifted: HashSet<&str> = trailed.iter().map(|m| m.artifact_id.as_str()).collect();
+        sink_retired_and_mark_the_cliff(&mut results[..visible], reranked, &lifted);
 
         // Recorded while the list is wider than the answer, off the request path except at the UI
         // door. The band is read first so it is in the pool; it is appended after the truncate,
@@ -1584,6 +1610,10 @@ impl Core {
                         .as_ref()
                         .filter(|(id, _)| *id == r.artifact_id)
                         .map(|(_, natural)| *natural as i64),
+                    trail_id: trailed
+                        .iter()
+                        .find(|m| m.artifact_id == r.artifact_id)
+                        .map(|m| m.trail_id.clone()),
                 })
                 .collect();
             candidates.extend(
@@ -1596,6 +1626,7 @@ impl Core {
                         shown: true,
                         band: true,
                         explored_from: None,
+                        trail_id: None,
                     }),
             );
             let event = crate::store::feedback::NewEvent {
@@ -4934,7 +4965,7 @@ mod tests {
             dummy("c", 0.30),
             dummy("d", 0.28),
         ];
-        mark_past_cliff(&mut results, true);
+        mark_past_cliff(&mut results, true, &Default::default());
         assert_eq!(
             results.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, true, true]
@@ -4948,7 +4979,7 @@ mod tests {
         );
 
         let mut flat = vec![dummy("a", 0.5), dummy("b", 0.5), dummy("c", 0.5)];
-        mark_past_cliff(&mut flat, true);
+        mark_past_cliff(&mut flat, true, &Default::default());
         assert!(flat.iter().all(|r| !r.past_cliff));
     }
 
@@ -4968,7 +4999,7 @@ mod tests {
             dummy("c", 0.30, false),
             dummy("d", 0.29, false),
         ];
-        sink_retired_and_mark_the_cliff(&mut results, true);
+        sink_retired_and_mark_the_cliff(&mut results, true, &Default::default());
         assert_eq!(
             results
                 .iter()
@@ -5006,7 +5037,7 @@ mod tests {
             .enumerate()
             .map(|(i, (f, s))| dummy(&i.to_string(), *f, Some(s)))
             .collect();
-        mark_past_cliff(&mut even, false);
+        mark_past_cliff(&mut even, false, &Default::default());
         assert!(
             even.iter().all(|r| !r.past_cliff),
             "a cliff was drawn on a list whose similarity falls evenly"
@@ -5019,16 +5050,26 @@ mod tests {
             .enumerate()
             .map(|(i, (f, s))| dummy(&i.to_string(), *f, Some(s)))
             .collect();
-        mark_past_cliff(&mut three, false);
+        mark_past_cliff(&mut three, false, &Default::default());
         assert_eq!(
             three.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true]
         );
 
+        // A hit a trail lifted is above the cut though its similarity is not.
+        let mut lifted = three.clone();
+        lifted.iter_mut().for_each(|r| r.past_cliff = false);
+        let id = lifted[3].artifact_id.clone();
+        mark_past_cliff(&mut lifted, false, &HashSet::from([id.as_str()]));
+        assert_eq!(
+            lifted.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, false, true]
+        );
+
         let mut tail = three.clone();
         tail[4].similarity = None;
         tail.iter_mut().for_each(|r| r.past_cliff = false);
-        mark_past_cliff(&mut tail, false);
+        mark_past_cliff(&mut tail, false, &Default::default());
         assert_eq!(
             tail.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true]
@@ -5036,7 +5077,7 @@ mod tests {
         let mut mixed = three.clone();
         mixed[1].similarity = None;
         mixed.iter_mut().for_each(|r| r.past_cliff = false);
-        mark_past_cliff(&mut mixed, false);
+        mark_past_cliff(&mut mixed, false, &Default::default());
         assert_eq!(
             mixed.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true],
@@ -5045,7 +5086,7 @@ mod tests {
         let mut leading = three.clone();
         leading[0].similarity = None;
         leading.iter_mut().for_each(|r| r.past_cliff = false);
-        mark_past_cliff(&mut leading, false);
+        mark_past_cliff(&mut leading, false, &Default::default());
         assert_eq!(
             leading.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true],
@@ -5056,7 +5097,7 @@ mod tests {
             r.similarity = None;
             r.past_cliff = false;
         });
-        mark_past_cliff(&mut none, false);
+        mark_past_cliff(&mut none, false, &Default::default());
         assert!(none.iter().all(|r| !r.past_cliff));
 
         let mut inverted: Vec<SearchResult> = [0.80, 0.40, 0.78]
@@ -5064,7 +5105,7 @@ mod tests {
             .enumerate()
             .map(|(i, s)| dummy(&i.to_string(), 1.0 - i as f32 * 0.1, Some(*s)))
             .collect();
-        mark_past_cliff(&mut inverted, false);
+        mark_past_cliff(&mut inverted, false, &Default::default());
         assert!(
             inverted.iter().all(|r| !r.past_cliff),
             "an out-of-order hit manufactured a cliff above itself"
@@ -5077,7 +5118,7 @@ mod tests {
             .enumerate()
             .map(|(i, s)| dummy(&i.to_string(), 1.0 - i as f32 * 0.1, Some(*s)))
             .collect();
-        mark_past_cliff(&mut still, false);
+        mark_past_cliff(&mut still, false, &Default::default());
         assert_eq!(
             still.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true]
@@ -5183,5 +5224,193 @@ mod tests {
         assert_eq!(got[0].kind, "opened");
         assert_eq!(got[1].kind, "pivoted");
         assert_eq!(got[1].via.as_deref(), Some("other"));
+    }
+
+    const FLUMPH: &str = "how do I flumph";
+
+    fn q4(text: &str) -> SearchQuery {
+        SearchQuery {
+            limit: 4,
+            ..q(text)
+        }
+    }
+
+    /// Six notes, of which a four-row search for FLUMPH returns four, and a trail from FLUMPH to
+    /// one it does not return.
+    async fn trailed(source: crate::store::trails::TrailSource) -> (crate::core::Core, String) {
+        let core = test_core().await;
+        let texts: Vec<(String, String)> = (0..6)
+            .map(|i| (format!("note {i}"), format!("t{i}")))
+            .collect();
+        for (text, tag) in &texts {
+            seed_from(&core, text, &[(text.as_str(), "c", &[tag.as_str()][..])]).await;
+        }
+        let (got, _) = core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
+        let far = core
+            .store
+            .list_all_artifact_ids()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|id| got.iter().all(|h| &h.artifact_id != id))
+            .unwrap();
+        let vec = core.embedder.embed_query(FLUMPH).await.unwrap();
+        core.store
+            .mint_trail(
+                &crate::store::trails::NewTrail {
+                    artifact_id: &far,
+                    query: FLUMPH,
+                    query_vec: &vec,
+                    embed_model: core.embedder.model(),
+                    source,
+                    source_id: "e1",
+                },
+                8,
+                20_000,
+            )
+            .await
+            .unwrap();
+        core.drop_trail_index();
+        (core, far)
+    }
+
+    fn has(hits: &[SearchResult], id: &str) -> bool {
+        hits.iter().any(|h| h.artifact_id == id)
+    }
+
+    fn set_trail_weight(core: &crate::core::Core, w: f32) {
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .trail_weight = w;
+    }
+
+    #[tokio::test]
+    async fn a_note_the_store_does_not_return_is_found_through_its_trail() {
+        let (core, far_note) = trailed(crate::store::trails::TrailSource::Verdict).await;
+        let (hits, _) = core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
+        let h = hits.iter().find(|h| h.artifact_id == far_note).unwrap();
+        assert!(h.explanation.as_ref().unwrap().trail.is_some());
+        assert!(!h.weak);
+    }
+
+    #[tokio::test]
+    async fn with_trail_weight_zero_it_is_not_found() {
+        let (core, far) = trailed(crate::store::trails::TrailSource::Verdict).await;
+        set_trail_weight(&core, 0.0);
+        let (hits, _) = core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
+        assert!(!has(&hits, &far));
+    }
+
+    #[tokio::test]
+    async fn at_the_judge_door_its_own_trail_does_not_find_it() {
+        let (core, far) = trailed(crate::store::trails::TrailSource::Verdict).await;
+        let (hits, _) = core
+            .search_with(&q4(FLUMPH), None, Door::Judge)
+            .await
+            .unwrap();
+        assert!(!has(&hits, &far));
+    }
+
+    /// Keeps the order it is given, with one text last.
+    struct Burying(String);
+
+    #[async_trait::async_trait]
+    impl crate::infer::Reranker for Burying {
+        async fn rerank(
+            &self,
+            _q: &str,
+            docs: &[String],
+            top_n: usize,
+        ) -> Result<Vec<(usize, f32)>> {
+            let mut order: Vec<usize> = (0..docs.len()).collect();
+            order.sort_by_key(|&i| docs[i] == self.0);
+            Ok(order
+                .into_iter()
+                .take(top_n)
+                .map(|i| (i, 1.0 / (i as f32 + 1.0)))
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_matched_note_the_reranker_cut_is_still_in_the_results() {
+        let (mut core, far) = trailed(crate::store::trails::TrailSource::Verdict).await;
+        let text = core.store.get_artifact(&far).await.unwrap().text;
+        core.reranker = Some(std::sync::Arc::new(Burying(text)));
+        // So the put-back row lands inside a three-row answer.
+        set_trail_weight(&core, 1.0);
+        let query = SearchQuery {
+            limit: 3,
+            ..q(FLUMPH)
+        };
+        let (hits, out) = core.search_with(&query, Some(3), Door::Ask).await.unwrap();
+        assert!(out.timing.reranked);
+        assert!(has(&hits, &far));
+    }
+
+    #[tokio::test]
+    async fn a_trashed_note_is_not_joined_by_its_trail() {
+        let (core, far) = trailed(crate::store::trails::TrailSource::Verdict).await;
+        core.trash_artifact(&far).await.unwrap();
+        let (hits, _) = core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
+        assert!(!has(&hits, &far));
+    }
+
+    #[tokio::test]
+    async fn a_note_outside_the_tag_filter_is_not_joined_by_its_trail() {
+        let (core, far) = trailed(crate::store::trails::TrailSource::Verdict).await;
+        let (got, _) = core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
+        let other = got.iter().find(|h| h.artifact_id != far).unwrap();
+        let query = SearchQuery {
+            tags: other.tags.clone(),
+            ..q4(FLUMPH)
+        };
+        let (hits, _) = core.search_with(&query, None, Door::Ui).await.unwrap();
+        assert_eq!(ids_of(&hits), [other.artifact_id.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn a_keyword_fallback_search_runs_no_trail_step() {
+        let (mut core, _) = trailed(crate::store::trails::TrailSource::Verdict).await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::FakeEmbedder::rejecting("down"));
+        let (hits, out) = core.search_with(&q4("note"), None, Door::Ui).await.unwrap();
+        assert!(out.explanation.keyword_only);
+        assert!(
+            hits.iter()
+                .all(|h| h.explanation.as_ref().is_none_or(|e| e.trail.is_none()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_trail_counts_on_a_base_nobody_judged_and_not_while_labels_are_stopped() {
+        let (core, far) = trailed(crate::store::trails::TrailSource::Label).await;
+        // Half a person trail's weight; at 1.0 it lands where a person trail does at 0.5.
+        set_trail_weight(&core, 1.0);
+        core.refresh_model_trails_count().await;
+        assert!(core.model_trails_count());
+        let (hits, _) = core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
+        assert!(has(&hits, &far));
+        // What the refresh sets once the labels are stopped.
+        core.model_trails
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let (hits, _) = core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
+        assert!(!has(&hits, &far));
+    }
+
+    #[tokio::test]
+    async fn a_recorded_candidate_carries_the_trail_that_brought_it() {
+        let (mut core, far) = trailed(crate::store::trails::TrailSource::Verdict).await;
+        core.learn.enabled = true;
+        core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
+        let trail = sqlx::query_scalar!(
+            "SELECT trail_id FROM search_candidates WHERE artifact_id = ?",
+            far
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        let live = core.store.live_trails("fake-embed").await.unwrap();
+        assert_eq!(trail.as_deref(), Some(live[0].id.as_str()));
     }
 }

@@ -27,17 +27,7 @@ pub async fn relevant_at(core: &Core) -> Result<f64> {
 /// state; `None` when the whole note does not fit one request, since a cut text is not judged.
 pub async fn answers(core: &Core, query: &str, note: &Chunk) -> Result<Option<f64>> {
     let asked = answers_query(query);
-    let room = state::room(core, &[&asked]);
-    let shown = state::one(
-        &state::Note {
-            title: note.title.as_deref(),
-            day: None,
-            text: &note.text,
-        },
-        &core.counter,
-        room,
-    );
-    let Some(shown) = shown else {
+    let Some(shown) = shown(core, &asked, note) else {
         return Ok(None);
     };
     let permit = core.gate.background_light().await;
@@ -53,6 +43,24 @@ pub async fn answers(core: &Core, query: &str, note: &Chunk) -> Result<Option<f6
             detail: "the answer has none for \"answers_query\"".into(),
         }),
     }
+}
+
+/// Whether `answers` would ask about the note: the deep look drops one that does not fit before
+/// counting its pool.
+pub fn fits(core: &Core, query: &str, note: &Chunk) -> bool {
+    shown(core, &answers_query(query), note).is_some()
+}
+
+fn shown(core: &Core, asked: &crate::core::judging::Asked, note: &Chunk) -> Option<String> {
+    state::one(
+        &state::Note {
+            title: note.title.as_deref(),
+            day: None,
+            text: &note.text,
+        },
+        &core.counter,
+        state::room(core, &[asked]),
+    )
 }
 
 /// Labels the search. A failure stores no label and is remembered, so the sweep passes the search
@@ -132,7 +140,10 @@ async fn label(core: &Core, event_id: &str) -> Result<()> {
             answers_query("").version,
             core.decider.model(),
         )
-        .await
+        .await?;
+    let after = core.trails_after_labels(event_id, &rows).await;
+    crate::core::trails::shrug("a labelled search", after);
+    Ok(())
 }
 
 /// Marks a search none of whose live candidates fits one request as labelled, so it leaves the
@@ -148,12 +159,27 @@ async fn step_aside(core: &Core, event_id: &str) -> Result<()> {
         .await
 }
 
+/// How many of the newest labelled searches the model's selectivity is read over, with no verdict
+/// from the person needed.
+pub const SELECTIVITY_WINDOW: i64 = 200;
+
+/// Why the model's labels are not steering sweeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// Over enough judged searches it missed what they found, or called too much relevant.
+    ByThePerson,
+    /// Over its newest searches it calls too much relevant, whatever the person judged.
+    BySelectivity,
+}
+
 /// Retrieval by the model's labels, how far they agree with the person, and decide's bearing record.
 #[derive(Debug, Clone, Default)]
 pub struct Figures {
     pub retrieval: crate::store::search_labels::ModelRetrieval,
     pub agreement: crate::store::search_labels::Agreement,
     pub bears: crate::store::search_labels::BearsRecord,
+    pub stopped: Option<Stopped>,
+    /// `stopped.is_none()`.
     pub counts: bool,
 }
 
@@ -165,34 +191,51 @@ impl Core {
             self.decider.model(),
         );
         let agreement = self.store.label_agreement(at, version, model).await?;
+        let stopped = self.stopped_by(&agreement, at).await?;
         Ok(Figures {
             retrieval: self.store.model_retrieval(at, version, model).await?,
-            counts: self.agrees_enough(&agreement),
+            counts: stopped.is_none(),
+            stopped,
             agreement,
             bears: self.store.bears_record(model).await?,
         })
     }
 
-    /// Whether the model's labels may steer a sweep: over enough searches the person judged, it
-    /// finds what they found and does not call everything relevant.
+    /// Whether the model's labels may steer a sweep: they do, unless the person's verdicts show
+    /// them bad or the model calls too much relevant.
     pub async fn labels_count(&self) -> Result<bool> {
+        let at = relevant_at(self).await?;
         let g = self
             .store
-            .label_agreement(
-                relevant_at(self).await?,
-                answers_query("").version,
-                self.decider.model(),
-            )
+            .label_agreement(at, answers_query("").version, self.decider.model())
             .await?;
-        Ok(self.agrees_enough(&g))
+        Ok(self.stopped_by(&g, at).await?.is_none())
     }
 
     /// `labels_count`'s rule, over an agreement already read.
-    fn agrees_enough(&self, g: &crate::store::search_labels::Agreement) -> bool {
+    async fn stopped_by(
+        &self,
+        g: &crate::store::search_labels::Agreement,
+        relevant_at: f64,
+    ) -> Result<Option<Stopped>> {
         let c = &self.decide_cfg;
-        g.judged >= c.label_overlap_min
-            && g.hit_rate >= c.label_agree_min
-            && g.selectivity <= c.label_select_max
+        if g.judged >= c.label_overlap_min
+            && (g.hit_rate < c.label_agree_min || g.selectivity > c.label_select_max)
+        {
+            return Ok(Some(Stopped::ByThePerson));
+        }
+        let recent = self
+            .store
+            .recent_selectivity(
+                relevant_at,
+                answers_query("").version,
+                self.decider.model(),
+                SELECTIVITY_WINDOW,
+            )
+            .await?;
+        Ok(recent
+            .filter(|s| *s > c.label_select_max)
+            .map(|_| Stopped::BySelectivity))
     }
 }
 
@@ -696,5 +739,57 @@ mod tests {
         assert!(!Stage::Label.reads_a_capture());
         assert_eq!(Stage::ALL[25], Stage::Label);
         assert_eq!(Stage::parse("label"), Some(Stage::Label));
+    }
+
+    #[tokio::test]
+    async fn on_a_base_nobody_judged_the_labels_count() {
+        let core = test_core().await;
+        assert!(core.labels_count().await.unwrap());
+        assert_eq!(core.label_figures().await.unwrap().stopped, None);
+    }
+
+    #[tokio::test]
+    async fn a_model_that_calls_everything_relevant_is_stopped_without_a_verdict() {
+        let mut core = test_core().await;
+        core.decider = labeller(0.95);
+        let c = vec![note(&core, "One").await, note(&core, "Two").await];
+        for i in 0..5 {
+            let id = search(&core, &format!("q{i}"), &c).await;
+            run(&core, &id).await.unwrap();
+        }
+        assert!(!core.labels_count().await.unwrap());
+        assert_eq!(
+            core.label_figures().await.unwrap().stopped,
+            Some(Stopped::BySelectivity)
+        );
+    }
+
+    #[tokio::test]
+    async fn thirty_judged_searches_the_model_missed_stop_the_labels() {
+        let mut core = test_core().await;
+        core.decider = labeller(0.95);
+        let c = vec![note(&core, "One").await, note(&core, "Two").await];
+        let (version, model) = (version(), core.decider.model().to_string());
+        for i in 0..30 {
+            let id = search(&core, &format!("q{i}"), &c).await;
+            // Half the time the model rates the expected note low; one of two is relevant.
+            let rows = [
+                (c[0].clone(), if i % 2 == 0 { 0.95 } else { 0.1 }),
+                (c[1].clone(), 0.1),
+            ];
+            core.store
+                .put_search_labels(&id, &rows, version, &model)
+                .await
+                .unwrap();
+            core.store
+                .judge_hit(&id, &c[0], Labeller::Confirm)
+                .await
+                .unwrap();
+        }
+        assert!(!core.labels_count().await.unwrap());
+        assert_eq!(
+            core.label_figures().await.unwrap().stopped,
+            Some(Stopped::ByThePerson)
+        );
     }
 }

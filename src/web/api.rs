@@ -1286,8 +1286,12 @@ async fn get_artifact(
             .store
             .event_is_mine(event, &tenant.user.subject)
             .await?
-        && tenant.core.store.open_event(event, &cid).await?
+        && let (true, first) = tenant.core.store.open_event_first(event, &cid).await?
     {
+        // Once a search: a reload is not a second confirmation.
+        if first {
+            crate::core::trails::shrug("an open", tenant.core.trails_after_open(event, &cid).await);
+        }
         search_event = Some(event.to_string());
     }
     // A deleted document does not make its artifact unreadable.
@@ -4180,7 +4184,10 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn api_decide_says_not_held_with_200() {
-        let (app, token) = deciding_app(crate::core::decide::tests::none_bear(), false).await;
+        // An empty base: with notes the closest would be weighed.
+        let mut core = crate::core::test_support::test_core().await;
+        crate::core::decide::tests::deciding(&mut core, crate::core::decide::tests::none_bear());
+        let (app, token) = app_with_token(core).await;
         let res = app
             .oneshot(post_json(
                 "/api/v1/decide",

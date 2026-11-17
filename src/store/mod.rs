@@ -8,6 +8,7 @@ pub mod control;
 pub mod corpora;
 pub mod decision_log;
 pub mod decisions;
+pub mod deep_looks;
 pub mod eval_runs;
 pub mod feedback;
 pub mod gaps;
@@ -29,6 +30,7 @@ pub mod segments;
 pub mod shingle;
 pub mod sleep_runs;
 pub mod sweeps;
+pub mod trails;
 pub mod versions;
 
 use crate::error::Result;
@@ -102,7 +104,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 34] = [
+        const ADDITIVE: [(&str, &str, &str); 36] = [
             (
                 "artifacts",
                 "trashed_at",
@@ -195,6 +197,12 @@ impl Store {
                 "explored_from",
                 "ALTER TABLE search_candidates ADD COLUMN explored_from INTEGER",
             ),
+            // NULL: no trail lifted a row from before.
+            (
+                "search_candidates",
+                "trail_id",
+                "ALTER TABLE search_candidates ADD COLUMN trail_id TEXT",
+            ),
             (
                 "search_events",
                 "generation_id",
@@ -284,6 +292,12 @@ impl Store {
                 "decisions",
                 "opened_at",
                 "ALTER TABLE decisions ADD COLUMN opened_at INTEGER",
+            ),
+            // 0: a row from before had a bearing passage or none was weighed.
+            (
+                "decide_events",
+                "weak",
+                "ALTER TABLE decide_events ADD COLUMN weak INTEGER NOT NULL DEFAULT 0",
             ),
         ];
         apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;

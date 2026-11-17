@@ -145,6 +145,10 @@ context_tokens = 8192
 # settled_at = 0.80
 # The share of bearing against the verdict that makes it split.
 # split_at = 0.34
+# The closest passages weighed when none reaches the line (1 to 8).
+# weak_take = 3
+# Notes a deep look asks about, at most (1 to 50).
+# deep_max = 24
 # After a writer call, a rewrite whose `complete` or `adds_nothing` is below this is not stored.
 # A refusal line, not a pass line; the literal checks run first.
 # refuse_below = 0.25
@@ -337,6 +341,16 @@ month_cycle = 0.0
 [sitting]
 # Let what this sitting touched lift a result; needs associate.prime_lift above 0.
 prime = true
+
+# What a note was found for. Used at [learn] mode = full.
+# [trails]
+# How much a matching trail counts in the order (0 turns trails off). On a ladder.
+# weight = 0.5
+# Similarity between a query and a trail's from which the trail matches.
+# match_at = 0.80
+# Live trails a note keeps, and a base keeps.
+# per_note = 8
+# max = 20000
 
 [time]
 # Due reminders inside this window show on the front page.

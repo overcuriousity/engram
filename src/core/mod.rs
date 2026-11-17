@@ -16,6 +16,7 @@ pub mod ranking;
 pub mod recommend;
 pub mod search;
 pub mod sitting;
+pub mod trails;
 
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
@@ -173,6 +174,13 @@ pub struct Core {
     /// Whether and how the area under the search box is filled.
     pub recommend: crate::config::RecommendConfig,
     pub ui: crate::config::UiConfig,
+    pub trails_cfg: crate::config::TrailsConfig,
+    /// Shared by every clone; `None` until a search loads it. See `Core::trail_index`.
+    pub trail_index: Arc<std::sync::RwLock<Option<Arc<crate::core::trails::TrailIndex>>>>,
+    /// Whether model trails match; see `Core::model_trails_count`.
+    pub model_trails: Arc<std::sync::atomic::AtomicBool>,
+    /// Moved by every `drop_trail_index`, so a load that raced a change is not kept.
+    pub trail_gen: Arc<std::sync::atomic::AtomicU64>,
     /// Shared by every clone and across registry evictions; see `Working`.
     pub sittings: Arc<crate::core::sitting::Sittings>,
     /// Shared by every clone: the point is one queue of calls in front of one GPU.
@@ -466,6 +474,7 @@ impl Core {
                     &cfg.associate,
                     &cfg.consolidate,
                     &cfg.sitting,
+                    &cfg.trails,
                     cfg.infer.rerank.is_some(),
                 ),
             )),
@@ -486,6 +495,10 @@ impl Core {
             reap: cfg.reap.clone(),
             recommend: cfg.recommend.clone(),
             ui: cfg.ui.clone(),
+            trails_cfg: cfg.trails.clone(),
+            trail_index: Default::default(),
+            model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            trail_gen: Default::default(),
             sittings: working.sittings,
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
@@ -781,6 +794,10 @@ pub mod test_support {
                 ..Default::default()
             },
             ui: Default::default(),
+            trails_cfg: Default::default(),
+            trail_index: Default::default(),
+            model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            trail_gen: Default::default(),
             sittings: Arc::new(Default::default()),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::ZERO,

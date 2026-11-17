@@ -139,6 +139,7 @@ macro_rules! decide_gaps_from {
     () => {
         " FROM decide_events
           WHERE ((not_held = 1 AND COALESCE(verdict, '') <> 'wrong')
+                 OR (weak = 1 AND COALESCE(verdict, '') <> 'right')
                  OR (not_held = 0 AND verdict = 'nothing_here'))
             AND dismissed_at IS NULL
             AND embed_model = ? AND vec_dim > 0
@@ -147,7 +148,7 @@ macro_rules! decide_gaps_from {
     };
 }
 
-/// Unjudged, a not-held decision dates from when it was made.
+/// Unjudged, a not-held or weak decision dates from when it was made.
 macro_rules! decide_gaps_sql {
     ($cols:literal) => {
         concat!(
@@ -774,8 +775,8 @@ impl Store {
     }
 
     /// `gap_id` names one of several tables, so no foreign key cascades. Also drops coverage
-    /// scored under `below`, except `capture` and `model` rows, which no line wrote, and what the
-    /// model said of a gap that is gone. Returns the coverage dropped.
+    /// scored under `below` (not `capture` or `model` rows, which no line wrote), what the model
+    /// said of a gap that is gone, and a gone source's deep looks. Returns the coverage dropped.
     pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
         sqlx::query!(
             "DELETE FROM gap_rejections
@@ -790,6 +791,40 @@ impl Store {
                  OR (kind = 'decide'
                      AND NOT EXISTS (SELECT 1 FROM decide_events WHERE id = gap_rejections.gap_id))
                  OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject', 'decide')"
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query!(
+            "DELETE FROM deep_looks
+              WHERE (source_kind = 'ask'
+                     AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = deep_looks.source_id))
+                 OR (source_kind IN ('search', 'unmatched', 'labelled')
+                     AND NOT EXISTS (SELECT 1 FROM search_events WHERE id = deep_looks.source_id))
+                 OR (source_kind = 'pursuit'
+                     AND NOT EXISTS (SELECT 1 FROM pursuits WHERE id = deep_looks.source_id))
+                 OR (source_kind = 'subject'
+                     AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = deep_looks.source_id))
+                 OR (source_kind IN ('decide', 'weak_right', 'second_reading')
+                     AND NOT EXISTS (SELECT 1 FROM decide_events WHERE id = deep_looks.source_id))
+                 OR source_kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject', 'decide',
+                                        'weak_right', 'second_reading', 'labelled')"
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query!(
+            "DELETE FROM deep_look_failures
+              WHERE (source_kind = 'ask'
+                     AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = deep_look_failures.source_id))
+                 OR (source_kind IN ('search', 'unmatched', 'labelled')
+                     AND NOT EXISTS (SELECT 1 FROM search_events WHERE id = deep_look_failures.source_id))
+                 OR (source_kind = 'pursuit'
+                     AND NOT EXISTS (SELECT 1 FROM pursuits WHERE id = deep_look_failures.source_id))
+                 OR (source_kind = 'subject'
+                     AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = deep_look_failures.source_id))
+                 OR (source_kind IN ('decide', 'weak_right', 'second_reading')
+                     AND NOT EXISTS (SELECT 1 FROM decide_events WHERE id = deep_look_failures.source_id))
+                 OR source_kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject', 'decide',
+                                        'weak_right', 'second_reading', 'labelled')"
         )
         .execute(&self.pool)
         .await?;
@@ -1999,6 +2034,7 @@ mod tests {
                 prior: "{}".into(),
                 standing: r#"{"verdict":"not_held"}"#.into(),
                 not_held: true,
+                weak: false,
                 model: "clef".into(),
                 decider: "clef".into(),
                 read: 0,

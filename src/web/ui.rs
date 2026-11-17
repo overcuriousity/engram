@@ -176,6 +176,7 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
         "rescue" => "Writing rescues",
         "read" => "Reading notes",
         "label" => "Labelling searches",
+        "deepen" => "Looking deeper",
         other => other,
     }
 }
@@ -976,6 +977,9 @@ pub(crate) fn why_ranked(e: &crate::core::explain::HitExplanation) -> Option<Str
     }
     if matches!(e.cap, crate::core::explain::CapEffect::Refilled) {
         parts.push("kept only because one source filled the list".to_string());
+    }
+    if e.trail.is_some() {
+        parts.push("found before for a similar query".to_string());
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -3703,6 +3707,24 @@ mod tests {
             s.contains("one source filled the list"),
             "the operator gets the consequence, not the mechanism: got {s:?}"
         );
+    }
+
+    #[test]
+    fn a_trail_hit_says_it_was_found_before_and_not_for_which_words() {
+        let e = crate::core::explain::HitExplanation {
+            trail: Some(crate::core::explain::TrailEffect {
+                similarity: 0.9,
+                moved: Default::default(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            why_ranked(&e).as_deref(),
+            Some("found before for a similar query")
+        );
+        // The words are one member's; the row goes to all of them.
+        let wire = serde_json::to_string(&e).unwrap();
+        assert!(!wire.contains("query"), "{wire}");
     }
 
     #[test]

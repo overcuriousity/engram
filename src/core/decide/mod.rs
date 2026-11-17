@@ -7,7 +7,7 @@ pub mod verdict;
 pub mod wire;
 
 use super::Core;
-use super::search::SearchQuery;
+use super::search::{SearchQuery, SearchResult};
 use crate::error::{Error, Result};
 use crate::infer::budget::TokenCounter;
 use crate::infer::decide::{
@@ -26,6 +26,8 @@ pub const MAX_CALLER_QUESTIONS: usize = 8;
 pub const MAX_SITUATION_TOKENS: usize = 2000;
 /// Decide's `settled_at` as the tuner records it, beside the background questions' lines.
 pub const SETTLED_ID: &str = "decide_settled";
+/// Decide's `bears_min` as the tuner records it.
+pub const BEARS_ID: &str = "decide_bears";
 
 /// Decide's era: the model and the wording of `bears`.
 pub fn settled_era(model: &str) -> String {
@@ -91,6 +93,8 @@ pub struct Decision {
     pub state: Option<String>,
     /// Every passage read, by rank; stored, not in the JSON.
     pub reads: Vec<PassageRead>,
+    /// Nothing reached the line, so the closest were weighed: loose matches.
+    pub weak: bool,
 }
 
 impl Decision {
@@ -272,6 +276,19 @@ impl Core {
         }
     }
 
+    /// The tuned bearing line for this model's era, else config.
+    pub async fn bears_at(&self) -> f64 {
+        let era = settled_era(self.decider.model());
+        match self.store.thresholds_in_force(BEARS_ID, &era).await {
+            Ok(Some(t)) => t.act_at,
+            Ok(None) => self.decide_cfg.bears_min,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the tuned bearing line; config is in force");
+                self.decide_cfg.bears_min
+            }
+        }
+    }
+
     /// A collector over `decide_events`, so there is exactly one account of what deciding means.
     pub async fn decide(&self, req: &DecideRequest, origin: impl Into<Origin>) -> Result<Decision> {
         let s = self.decide_events(req, origin);
@@ -300,6 +317,7 @@ impl Core {
             let (questions, situation) = (&asked.questions, asked.situation.as_deref());
             let mut cfg = core.decide_cfg.clone();
             cfg.settled_at = core.settled_at().await;
+            cfg.bears_min = core.bears_at().await;
 
             // Every spawned read holds a clone: a read still in flight keeps the lane until it is aborted.
             let lane = std::sync::Arc::new(core.gate.interactive());
@@ -380,8 +398,14 @@ impl Core {
             }
             reads.sort_by_key(|r| r.rank);
 
-            let mut bearing: Vec<&PassageRead> = reads.iter().filter(|r| r.bearing).collect();
+            // None over the line: the closest are weighed anyway, and the decision says so.
+            let weak = !reads.iter().any(|r| r.bearing);
+            let mut bearing: Vec<&PassageRead> =
+                reads.iter().filter(|r| r.bearing || weak).collect();
             bearing.sort_by(|a, b| b.bears.total_cmp(&a.bears).then(a.rank.cmp(&b.rank)));
+            if weak {
+                bearing.truncate(cfg.weak_take);
+            }
 
             let mut decision = Decision {
                 question: asked.q.clone(),
@@ -396,7 +420,9 @@ impl Core {
                 event_id: None,
                 state: None,
                 reads: Vec::new(),
+                weak: false,
             };
+            // Only when nothing was read at all.
             if bearing.is_empty() {
                 decision.reads = reads;
                 core.record_decision(&req, &asked, &origin, query_vec, &mut decision).await;
@@ -450,10 +476,11 @@ impl Core {
                         .map(|e| (e.bears, &e.read[i].1))
                         .collect();
                     let s = standing::standing(q, &v.answer, v.swapped_agree, &each, &cfg);
-                    (k.clone(), s)
+                    (k.clone(), standing::capped(s, weak))
                 })
                 .collect();
             decision.answers = Some(answers);
+            decision.weak = weak;
             decision.dropped = evidence.len() - packed;
             decision.evidence = evidence;
             decision.model = joint.answers.model;
@@ -493,7 +520,8 @@ impl Core {
                 }
             })
             .collect::<Vec<_>>();
-        let cited: Vec<String> = if held {
+        // Notes under the line are not positive evidence.
+        let cited: Vec<String> = if held && !d.weak {
             evidence
                 .iter()
                 .filter(|e| e.joint)
@@ -517,6 +545,7 @@ impl Core {
             prior: wire::prior_text(d),
             standing: wire::standing_text(d),
             not_held: !held,
+            weak: d.weak,
             model: d.model.clone(),
             decider: self.decider.model().to_string(),
             read: d.read,
@@ -533,6 +562,32 @@ impl Core {
         self.mark_artifacts_cited(cited);
     }
 
+    /// The situation cut to what `search_inner` accepts as a query; empty if it cannot be searched.
+    async fn search_situation(
+        &self,
+        situation: &str,
+        query: &impl Fn(String) -> SearchQuery,
+    ) -> Result<Vec<SearchResult>> {
+        let room = (self.embedder.max_input_tokens() as f32 * 0.8) as usize;
+        let frame = self
+            .counter
+            .count(&self.embedder.templates().render_query(""));
+        let Some(text) = self
+            .counter
+            .cut(situation, room.saturating_sub(frame), true)
+        else {
+            return Ok(Vec::new());
+        };
+        match self.search_with(&query(text), None, Door::Ask).await {
+            Ok((hits, _)) => Ok(hits),
+            // The situation only adds to what the question finds: no failure of its search fails the decision.
+            Err(e) => {
+                tracing::debug!(error = %e, "the situation was not searched; the question's notes stand");
+                Ok(Vec::new())
+            }
+        }
+    }
+
     /// Asks search for twice the limit, so dropping retired notes still leaves `limit` to read.
     /// The passages, and the vector the question was embedded as (empty on a keyword fallback).
     async fn decide_passages(
@@ -540,25 +595,27 @@ impl Core {
         req: &DecideRequest,
         asked: &Asked,
     ) -> Result<(Vec<Passage>, Vec<f32>)> {
+        let query = |q: String| SearchQuery {
+            q,
+            limit: (asked.limit * 2).min(50),
+            tags: req.tags.clone(),
+            category: req.category.clone(),
+            // As deliberate as asking.
+            mark: true,
+            include_deprecated: false,
+            include_superseded: false,
+            rerank: true,
+            explain: false,
+        };
         let (hits, outcome) = self
-            .search_with(
-                &SearchQuery {
-                    q: asked.q.clone(),
-                    limit: (asked.limit * 2).min(50),
-                    tags: req.tags.clone(),
-                    category: req.category.clone(),
-                    // As deliberate as asking.
-                    mark: true,
-                    include_deprecated: false,
-                    include_superseded: false,
-                    rerank: true,
-                    explain: false,
-                },
-                None,
-                Door::Ask,
-            )
+            .search_with(&query(asked.q.clone()), None, Door::Ask)
             .await?;
-        let hits: Vec<_> = hits
+        // The situation says what the question leaves out; a note may match only that.
+        let from_situation = match &asked.situation {
+            Some(s) => self.search_situation(s, &query).await?,
+            None => Vec::new(),
+        };
+        let hits: Vec<_> = interleave(hits, from_situation)
             .into_iter()
             .filter(|h| !h.retired)
             .take(asked.limit)
@@ -578,6 +635,24 @@ impl Core {
             })
             .collect();
         Ok((passages, outcome.query_vec))
+    }
+}
+
+/// `a[0], b[0], a[1], b[1], …`; a note already taken is skipped and the longer tail follows.
+fn interleave(a: Vec<SearchResult>, b: Vec<SearchResult>) -> Vec<SearchResult> {
+    let mut seen = std::collections::HashSet::new();
+    let (mut a, mut b) = (a.into_iter(), b.into_iter());
+    let mut out = Vec::new();
+    loop {
+        let (x, y) = (a.next(), b.next());
+        if x.is_none() && y.is_none() {
+            return out;
+        }
+        for h in x.into_iter().chain(y) {
+            if seen.insert(h.artifact_id.clone()) {
+                out.push(h);
+            }
+        }
     }
 }
 
@@ -733,22 +808,63 @@ pub(crate) mod tests {
         assert_eq!(d.reads.len(), 3);
     }
 
+    async fn cited_observations(core: &Core) -> i64 {
+        sqlx::query_scalar!("SELECT count(*) FROM observations WHERE source = 'cited'")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn nothing_bearing_means_no_verdict_whatever_the_model_would_say() {
-        let mut core = three_base().await;
-        let dec = deciding(&mut core, |_, qs| {
-            Ok(answers(qs, |q| Answer::Noul {
-                yes: if q.key == "bears" { 0.02 } else { 0.99 },
-            }))
-        });
-        let d = core.decide(&req("Keep bge-m3?"), Door::Api).await.unwrap();
-        assert!(d.not_held());
-        assert_eq!(d.answers, None);
-        assert_eq!(d.standing, vec![("verdict".to_string(), Standing::NotHeld)]);
-        assert!(d.evidence.is_empty());
-        assert_eq!(d.read, 3);
-        assert_eq!(d.prior.len(), 1);
-        assert!(dec.requests().iter().all(|(s, _)| !s.contains("Excerpt 1")));
+    async fn nothing_bearing_weighs_the_closest_and_says_so() {
+        let mut core = learning().await;
+        // A live generation, so a cited observation would be written if one were made.
+        core.store
+            .record_generation(&crate::store::generations::NewGeneration {
+                params: Default::default(),
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        deciding(&mut core, none_bear());
+        let d = core.decide(&req("Keep it?"), Door::Ui).await.unwrap();
+        assert!(d.weak && !d.not_held());
+        assert_eq!(d.evidence.len(), 3);
+        assert!(d.evidence.iter().all(|e| e.joint));
+        assert_eq!(d.standing[0].1, Standing::Leaning); // 0.99 would be settled
+        let stored = core
+            .store
+            .decision(d.event_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.weak && !stored.not_held);
+        assert!(stored.evidence.iter().all(|e| !e.bearing && e.n.is_some()));
+        assert_eq!(cited_observations(&core).await, 0);
+    }
+
+    #[tokio::test]
+    async fn one_passage_that_does_not_bear_is_weighed_alone() {
+        let mut core = base(&[("Only", "one note")]).await;
+        deciding(&mut core, none_bear());
+        // A capture is a source and its note: a limit of 1 reads one passage.
+        let r = DecideRequest {
+            limit: Some(1),
+            ..req("Keep it?")
+        };
+        let d = core.decide(&r, Door::Ui).await.unwrap();
+        assert!(d.weak);
+        assert_eq!((d.read, d.evidence.len()), (1, 1));
+    }
+
+    #[test]
+    fn a_weak_standing_is_never_settled() {
+        use standing::capped;
+        assert_eq!(capped(Standing::Settled, true), Standing::Leaning);
+        assert_eq!(capped(Standing::Split, true), Standing::Split);
+        assert_eq!(capped(Standing::Settled, false), Standing::Settled);
     }
 
     #[tokio::test]
@@ -1436,13 +1552,13 @@ pub(crate) mod tests {
             .await
             .unwrap();
         core.background.wait_idle().await;
-        assert!(d.not_held() && d.event_id.is_some());
+        assert!(d.weak && d.event_id.is_some());
         let ids: Vec<String> = d.reads.iter().map(|r| r.artifact_id.clone()).collect();
         let act = core.store.activation_of(&ids).await.unwrap();
         let first = act.get(&ids[0]).map(|(a, _, _)| *a);
         assert!(
             ids.iter().all(|i| act.get(i).map(|(a, _, _)| *a) == first),
-            "a decision the base does not hold cites nothing"
+            "a weak decision cites nothing"
         );
     }
 
@@ -1484,7 +1600,9 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_not_held_decision_is_recorded_and_is_an_open_gap() {
-        let mut core = learning().await;
+        // Nothing to read: a base with notes would weigh the closest.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
         deciding(&mut core, none_bear());
         let d = core
             .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
@@ -1492,13 +1610,7 @@ pub(crate) mod tests {
             .unwrap();
         let id = d.event_id.clone().expect("recorded");
         let s = core.store.decision(&id).await.unwrap().unwrap();
-        assert!(s.not_held && s.answers.is_none());
-        assert_eq!(s.evidence.len(), 3);
-        assert!(
-            s.evidence
-                .iter()
-                .all(|e| !e.bearing && e.n.is_none() && !e.joint)
-        );
+        assert!(s.not_held && s.answers.is_none() && s.evidence.is_empty());
         let gaps = decide_gaps(&core).await;
         assert_eq!(gaps.len(), 1);
         assert_eq!(
@@ -1565,7 +1677,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_not_held_decision_judged_wrong_is_no_gap_and_undoing_reopens_it() {
         use crate::store::asks::AskVerdict;
-        let mut core = learning().await;
+        let mut core = test_core().await;
+        core.learn.enabled = true;
         deciding(&mut core, none_bear());
         let d = core
             .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
@@ -1580,6 +1693,74 @@ pub(crate) mod tests {
         assert!(decide_gaps(&core).await.is_empty());
         core.store.unjudge_decision(&id).await.unwrap();
         assert_eq!(decide_gaps(&core).await.len(), 1);
+    }
+
+    #[test]
+    fn interleaving_takes_each_note_once_and_keeps_the_longer_tail() {
+        let hits = |ids: &[&str]| -> Vec<crate::core::search::SearchResult> {
+            ids.iter()
+                .map(|i| crate::core::search::SearchResult {
+                    artifact_id: i.to_string(),
+                    ..Default::default()
+                })
+                .collect()
+        };
+        let got: Vec<_> = interleave(hits(&["a", "b", "c"]), hits(&["b", "d"]))
+            .into_iter()
+            .map(|h| h.artifact_id)
+            .collect();
+        assert_eq!(got, ["a", "b", "d", "c"]);
+    }
+
+    async fn weak_decision(core: &mut Core) -> String {
+        deciding(core, none_bear());
+        let d = core.decide(&req("Keep it?"), Door::Ui).await.unwrap();
+        assert!(d.weak);
+        d.event_id.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_weak_decision_is_a_gap_until_judged_right() {
+        use crate::store::asks::AskVerdict;
+        let mut core = learning().await;
+        let id = weak_decision(&mut core).await;
+        let open =
+            |g: Vec<crate::store::gaps::Gap>| g.into_iter().map(|g| g.id).collect::<Vec<_>>();
+        assert_eq!(open(decide_gaps(&core).await), vec![id.clone()]);
+        core.judge_decision(&id, AskVerdict::Wrong, None)
+            .await
+            .unwrap();
+        assert_eq!(open(decide_gaps(&core).await), vec![id.clone()]);
+        core.judge_decision(&id, AskVerdict::Right, None)
+            .await
+            .unwrap();
+        assert!(decide_gaps(&core).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_verdict_on_a_weak_decision_touches_no_note() {
+        use crate::store::asks::AskVerdict;
+        let mut core = learning().await;
+        let id = weak_decision(&mut core).await;
+        let before = touched(&core).await;
+        for v in [AskVerdict::Right, AskVerdict::Wrong] {
+            let j = core.judge_decision(&id, v, None).await.unwrap();
+            assert_eq!(j.verdict, Some(v));
+        }
+        assert_eq!(touched(&core).await, before);
+    }
+
+    /// Notes stamped verified, and queued pairs.
+    async fn touched(core: &Core) -> (Vec<Option<i64>>, i64) {
+        let stamps = sqlx::query_scalar!("SELECT last_verified_at FROM artifacts ORDER BY id")
+            .fetch_all(&core.store.pool)
+            .await
+            .unwrap();
+        let pairs = sqlx::query_scalar!("SELECT count(*) FROM artifact_pairs")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        (stamps, pairs)
     }
 
     /// 30 held `settled` decisions made through `Core::decide` and judged by the person, `wrong` of
@@ -1660,15 +1841,36 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_bears_line_is_the_tuned_one_else_config() {
+        let core = test_core().await;
+        assert_eq!(core.bears_at().await, 0.5);
+        let era = settled_era(core.decider.model());
+        let to = crate::core::judging::band::Thresholds {
+            act_at: 0.46,
+            ask_at: 0.46,
+        };
+        core.store
+            .move_thresholds(BEARS_ID, &era, to, "test")
+            .await
+            .unwrap();
+        assert_eq!(core.bears_at().await, 0.46);
+    }
+
+    #[tokio::test]
     async fn decides_settled_line_rises_when_settled_verdicts_are_judged_wrong() {
         let mut core = three_base().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         deciding(&mut core, marked(0.81));
         judged_thirty(&mut core, 3).await;
 
-        assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 1);
+        // The thirty held "nothing here" decisions that leaned also move the bearing line.
+        assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 2);
         assert_eq!(core.settled_at().await, 0.82);
-        let m = &core.store.threshold_moves(10).await.unwrap()[0];
+        let moves = core.store.threshold_moves(10).await.unwrap();
+        let m = moves
+            .iter()
+            .find(|m| m.question_id == "decide_settled")
+            .unwrap();
         assert_eq!(
             (m.question_id.as_str(), m.era.as_str()),
             ("decide_settled", "rule-decider/v1")
@@ -1682,7 +1884,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn split_at_and_bears_min_are_never_moved() {
+    async fn split_at_is_never_moved() {
         let mut core = three_base().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         deciding(&mut core, marked(0.81));
@@ -1691,16 +1893,13 @@ pub(crate) mod tests {
         crate::jobs::tune::tune_questions(&core).await.unwrap();
         let moves = core.store.threshold_moves(10).await.unwrap();
         assert!(
-            moves.iter().all(|m| m.question_id == "decide_settled"),
+            moves
+                .iter()
+                .all(|m| ["decide_settled", "decide_bears"].contains(&m.question_id.as_str())),
             "{:?}",
             moves.iter().map(|m| &m.question_id).collect::<Vec<_>>()
         );
-        // None undone and held decisions leaning: settled_at comes down a step, and only it.
-        assert_eq!((moves.len(), moves[0].act_at), (1, 0.78));
-        assert_eq!(
-            (core.decide_cfg.split_at, core.decide_cfg.bears_min),
-            (0.34, 0.5)
-        );
+        assert_eq!(core.decide_cfg.split_at, 0.34);
         let shares = core
             .store
             .decide_shares(core.decider.model())
@@ -1709,5 +1908,31 @@ pub(crate) mod tests {
         assert_eq!(shares.split, (30, 0));
         assert_eq!(shares.held, (90, 30));
         assert_eq!(shares.not_held, (30, 30));
+    }
+
+    #[tokio::test]
+    async fn the_bearing_line_comes_down_when_weak_decisions_were_judged_right() {
+        use crate::store::asks::AskVerdict::{Right, Wrong};
+        use crate::store::decisions::test_support::judged_weak;
+        let mut core = three_base().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let decider = core.decider.model().to_string();
+        for i in 0..31 {
+            judged_weak(&core.store, &decider, "split", false, i < 4, Right).await;
+        }
+        assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 1);
+        assert_eq!(core.bears_at().await, 0.48);
+        let m = &core.store.threshold_moves(10).await.unwrap()[0];
+        assert_eq!(m.question_id, "decide_bears");
+        assert_eq!(m.reason, "4 of 31 weak held a note that answered");
+
+        // Wrong verdicts say nothing about where the line stands.
+        let mut core = three_base().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        for i in 0..31 {
+            let v = if i < 4 { Wrong } else { Right };
+            judged_weak(&core.store, &decider, "split", false, i < 4, v).await;
+        }
+        assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 0);
     }
 }

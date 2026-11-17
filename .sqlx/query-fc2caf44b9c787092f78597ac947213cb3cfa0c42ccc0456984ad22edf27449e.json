@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO deep_looks\n                   (source_kind, source_id, artifact_id, yes, question_version, model, at)\n                 VALUES (?, ?, ?, ?, ?, ?, ?)\n                 ON CONFLICT(source_kind, source_id, artifact_id) DO UPDATE SET\n                   yes = excluded.yes, question_version = excluded.question_version,\n                   model = excluded.model, at = excluded.at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "fc2caf44b9c787092f78597ac947213cb3cfa0c42ccc0456984ad22edf27449e"
+}

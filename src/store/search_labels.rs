@@ -72,6 +72,57 @@ impl Store {
         .await?)
     }
 
+    /// Labelled in this era, no candidate at or above `relevant_at`, verdict not 'hit', live embed
+    /// model; those with a gave_up observation first, then oldest.
+    pub async fn searches_left_out(
+        &self,
+        relevant_at: f64,
+        version: u32,
+        model: &str,
+        embed_model: &str,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let at = now();
+        Ok(sqlx::query_scalar!(
+            r#"SELECT e.id AS "id!" FROM search_events e
+                WHERE e.verdict IS NOT 'hit' AND e.verdict IS NOT 'discard'
+                  AND e.embed_model = ? AND e.vec_dim > 0
+                  AND EXISTS (SELECT 1 FROM search_labels l
+                               WHERE l.event_id = e.id AND l.artifact_id <> ''
+                                 AND l.question_version = ? AND l.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM search_labels l
+                                   WHERE l.event_id = e.id AND l.artifact_id <> ''
+                                     AND l.question_version = ? AND l.model = ? AND l.yes >= ?)
+                  AND NOT EXISTS (SELECT 1 FROM deep_looks d
+                                   WHERE d.source_kind = 'labelled' AND d.source_id = e.id
+                                     AND d.artifact_id = '' AND d.question_version = ?
+                                     AND d.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM deep_look_failures f
+                                   WHERE f.source_kind = 'labelled' AND f.source_id = e.id
+                                     AND f.question_version = ? AND f.model = ?
+                                     AND (f.refused >= ? OR f.retry_at > ?))
+                ORDER BY EXISTS (SELECT 1 FROM observations o
+                                  WHERE o.event_id = e.id AND o.source = 'gave_up') DESC,
+                         e.created_at ASC, e.id ASC
+                LIMIT ?"#,
+            embed_model,
+            version,
+            model,
+            version,
+            model,
+            relevant_at,
+            version,
+            model,
+            version,
+            model,
+            LABEL_GIVE_UP,
+            at,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// A failed attempt at labelling a search in this era: not due again before `retry_at`, and
     /// counted when the model `refused` it, which waiting does not fix. An older era's row starts
     /// over. Returns the refusals so far in this era.
@@ -123,6 +174,24 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(Some((query, candidates)))
+    }
+
+    /// The notes the labeller asked about for this search in this era; the step-aside row is none.
+    pub async fn labelled_notes(
+        &self,
+        event_id: &str,
+        version: u32,
+        model: &str,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT artifact_id FROM search_labels
+              WHERE event_id = ? AND artifact_id <> '' AND question_version = ? AND model = ?",
+            event_id,
+            version,
+            model
+        )
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     /// Replaces the search's labels: one era per search. Labelled, its failed attempts are done with.
@@ -267,6 +336,49 @@ impl Store {
         })
     }
 
+    /// Over the newest `last` searches this model labelled at this version: the mean share of a
+    /// search's labelled candidates that are relevant; `None` when there are none. Needs no verdict.
+    pub async fn recent_selectivity(
+        &self,
+        relevant_at: f64,
+        version: u32,
+        model: &str,
+        last: i64,
+    ) -> Result<Option<f64>> {
+        let rows = sqlx::query!(
+            r#"SELECT (SELECT COUNT(*) FROM search_labels l
+                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
+                          AND l.yes >= ? AND l.artifact_id <> '') AS "relevant!: i64",
+                      (SELECT COUNT(*) FROM search_labels l
+                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
+                          AND l.artifact_id <> '') AS "labelled!: i64"
+                 FROM search_events e
+                WHERE EXISTS (SELECT 1 FROM search_labels l
+                               WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
+                                 AND l.artifact_id <> '')
+                ORDER BY e.created_at DESC, e.id DESC LIMIT ?"#,
+            version,
+            model,
+            relevant_at,
+            version,
+            model,
+            version,
+            model,
+            last
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            rows.iter()
+                .map(|r| r.relevant as f64 / r.labelled as f64)
+                .sum::<f64>()
+                / rows.len() as f64,
+        ))
+    }
+
     /// Over the held decisions made under this configured model and the wording of `bears` in
     /// force, judged `right` or `nothing_here`: every bearing note was ruled on; one held up when
     /// its verdict was `right` and its own reading picked the same.
@@ -315,7 +427,8 @@ impl Store {
     }
 
     /// The candidate this model at this version rates highest for a search the person did not
-    /// judge, if it is relevant.
+    /// judge, if it is relevant. Not one a model trail brought: the model agreeing with its own
+    /// trail is no second opinion.
     pub async fn model_expected(
         &self,
         event_id: &str,
@@ -328,6 +441,11 @@ impl Store {
                  JOIN search_events e ON e.id = l.event_id
                 WHERE l.event_id = ? AND e.judged_at IS NULL AND l.yes >= ? AND l.artifact_id <> ''
                   AND l.question_version = ? AND l.model = ?
+                  AND NOT EXISTS (
+                        SELECT 1 FROM search_candidates c JOIN trails t ON t.id = c.trail_id
+                         WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id
+                           AND NOT EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = t.id
+                                              AND s.source IN ('verdict', 'ask', 'decide')))
                 ORDER BY l.yes DESC,
                          (SELECT MIN(c.rank) FROM search_candidates c
                            WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id) ASC
@@ -403,7 +521,7 @@ pub(crate) mod tests {
     const V: u32 = 1;
     const M: &str = "clef";
 
-    async fn search(store: &Store, query: &str, candidates: &[String]) -> String {
+    pub(crate) async fn search(store: &Store, query: &str, candidates: &[String]) -> String {
         store
             .record_search(
                 NewEvent {
@@ -437,7 +555,7 @@ pub(crate) mod tests {
         (0..n).map(|i| format!("{prefix}-{i}")).collect()
     }
 
-    async fn notes(store: &Store, n: usize) -> Vec<String> {
+    pub(crate) async fn notes(store: &Store, n: usize) -> Vec<String> {
         let src = store.insert_corpus("raw", "web", None).await.unwrap();
         let mut out = Vec::new();
         for i in 0..n {
@@ -752,6 +870,7 @@ pub(crate) mod tests {
                 prior: "{}".into(),
                 standing: "{}".into(),
                 not_held: false,
+                weak: false,
                 model: "as-reported".into(),
                 decider: M.into(),
                 read: reads.len() + 1,
@@ -1002,5 +1121,37 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[tokio::test]
+    async fn a_search_with_only_low_labels_was_left_out_and_one_with_a_relevant_label_was_not() {
+        let store = Store::memory().await.unwrap();
+        let n = notes(&store, 2).await;
+        let low = search(&store, "low", &n).await;
+        let found = search(&store, "found", &n).await;
+        for id in [&low, &found] {
+            sqlx::query!(
+                "UPDATE search_events SET embed_model = 'clef', vec_dim = 2 WHERE id = ?",
+                id
+            )
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+        store
+            .put_search_labels(&low, &[(n[0].clone(), 0.1), (n[1].clone(), 0.2)], 1, "m")
+            .await
+            .unwrap();
+        store
+            .put_search_labels(&found, &[(n[0].clone(), 0.1), (n[1].clone(), 0.9)], 1, "m")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .searches_left_out(0.5, 1, "m", "clef", 10)
+                .await
+                .unwrap(),
+            [low]
+        );
     }
 }

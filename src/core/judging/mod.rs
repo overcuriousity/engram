@@ -233,6 +233,9 @@ impl Core {
                 .count();
             n = n.saturating_add(live.max(1));
         }
+        // A deep look asks about up to `deep_max` notes.
+        let deep = self.store.queued_units(Stage::Deepen).await?.max(0) as usize;
+        n = n.saturating_add(deep.saturating_mul(self.decide_cfg.deep_max));
         Ok(n)
     }
 

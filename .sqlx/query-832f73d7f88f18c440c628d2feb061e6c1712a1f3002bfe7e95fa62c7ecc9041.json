@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artifact_id FROM deep_looks\n              WHERE source_kind = ? AND source_id = ? AND artifact_id <> ''\n                AND question_version = ? AND model = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deep_looks",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "832f73d7f88f18c440c628d2feb061e6c1712a1f3002bfe7e95fa62c7ecc9041"
+}

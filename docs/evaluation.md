@@ -94,11 +94,70 @@ your note relevant, and the **selectivity**, the mean share of a search's
 candidates it called relevant. A model that says yes to everything has a
 perfect hit rate and a selectivity of 1.0, which is why both are read. A label
 never becomes your verdict. An unjudged search adds the note the model rates
-highest to a sweep's pairs only while, over at least `decide.label_overlap_min`
-(30) of your judged searches, the hit rate is at least `decide.label_agree_min`
-(0.85) and the selectivity at most `decide.label_select_max` (0.30); otherwise
-the labels are shown and count for nothing. A new model or a new wording of
+highest to a sweep's pairs unless the labels are shown bad: over at least
+`decide.label_overlap_min` (30) of your judged searches the hit rate is under
+`decide.label_agree_min` (0.85) or the selectivity over `decide.label_select_max`
+(0.30), or, with no verdict needed, the selectivity over the model's newest 200
+labelled searches is over that maximum. Then the labels are shown and count for
+nothing, and Insights says which. A new model or a new wording of
 the question labels again from scratch.
+
+### Trails
+
+A trail is one query a note was confirmed to answer, kept on the note with the
+query's vector. Search matches a new query against the trails and gives a
+matching note a place in the list, whether or not its own wording was found:
+at the shipped weight the best match lands fourth for a person trail and eighth
+for a model trail, never first unless it already was, and it is never marked
+past the cliff. The rail says *found before for a similar query*; the trail's
+words are not shown, since another member may have typed them. A replay leaves out the trail made from the very query
+it replays, so a pair gains from trails only through another query's.
+
+A trail comes from a search judged a hit, an ask judged right, a decision
+judged with the right answer known, the labeller's find in an unjudged search,
+or a deep look's find. The first three are **person** trails; the last two are
+**model** trails and count half. A model trail matches from the first day and
+stops while the labels are shown bad. An open confirms a trail; the model can
+only withdraw a model trail.
+
+A trail goes after three misses over its matches: "nothing here" on a search it
+lifted a note in, or, for a model trail, the labeller rating that note under
+`answers_query`'s `ask_at` (0.60). "Nothing here" also takes back the model
+trail made from that same search. Undoing the verdict removes its pairing, and
+a trail left with none is retired. A trail whose words a new embed model
+refuses is retired. A model trail is deleted after
+`feedback.retain_days` without a confirmation; a person trail stays. Deleting
+captured searches deletes every trail.
+
+### The deep look
+
+While the base is quiet the decision model asks the labeller's question of
+notes a search did not show. Sources, in order: open gaps of every kind
+(including a weak decision not judged right), weak decisions judged right,
+unjudged decisions for their second reading, and recorded searches the labeller
+found nothing relevant in. Each gets one look per question version and model.
+
+The pool is the source's stored vector replayed to 50, plus the notes linked to
+the first five, less what was already asked about and what a search the
+person called a gap had shown, cut to at most
+`decide.deep_max` (24). Notes are asked alone; the look ends at the first one
+at the labeller's line. A find makes a model trail and covers the gap by the
+model; for a labelled search it is also a pair for the sweep. A person's
+verdict is never changed. Looks take a quarter of the decision tick's remaining
+budget and run only while the base is quiet. A note that is not in the first 50
+of the replay and not linked from the first five cannot be found.
+
+### Decide's bearing line
+
+When no passage reaches the line, Decide weighs the closest `decide.weak_take`
+(3) and marks the decision *from loose matches*; it is never settled. Only a
+base with no passage at all answers *not held*. The line, `bears_min` to start,
+moves a step of 0.02 when over `decide.tune_min` (30) judgements more than
+`decide.undo_target` (0.05) say it is wrong in one direction and more say that
+than the other. A weak decision judged right says it is too high; a held one
+judged *nothing here* says it is too low. *Wrong* says nothing. A decision
+nobody judged is read a second time while the base is quiet. A verdict
+replaces the reading. The line stays between 0.20 and 0.80.
 
 A grade is satisfied by anything that **superseded** the artifact it names.
 Merging moves knowledge into a new artifact and search correctly returns that
@@ -122,6 +181,7 @@ by the idle pass; the rest move by hand, on an argument the commit states.
 | Sitting priming *(ladder)* | `[sitting] prime` | Whether what this sitting has touched takes part in the lift. Shares `prime_lift`'s budget, so it does nothing at `0`. | MRR |
 | Reranker *(own rule)* | `[infer.rerank]` present or absent | A cross-encoder over the candidate pool. Scored against the rank that was served. | MRR first, recall second |
 | Associated band *(own rule)* | `[associate] spread_max` | How many linked artifacts hang under the list. Scored on what the band earned while serving. | neither; read the band's use |
+| Trail weight *(ladder)* | `[trails] weight` | How much a matching trail counts in the order. `0` turns trails off; it ships at `0.5`. | MRR |
 | Priming margin | `[associate] prime_margin` | How much more accessible a hit has to be before it climbs. On no ladder and measured by nothing. Change it on an argument, and say the argument. | nothing |
 | Pinned boost | `[vector] pinned_boost` | Extra score for a `pinned` tag, so a decision you made beats the decay curve. Measured by nothing. | nothing |
 | Embedding model and templates | `[infer.embed]` | The whole retrieval geometry. Needs `--reindex`. No runtime sweep can reach it; a change is an era, and the loop stops counting evidence from the one before. | nothing |

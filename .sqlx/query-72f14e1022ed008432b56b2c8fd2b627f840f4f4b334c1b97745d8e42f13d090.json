@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM trails\n              WHERE used_at < ?\n                AND NOT EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = trails.id\n                                   AND s.source IN ('verdict', 'ask', 'decide'))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "72f14e1022ed008432b56b2c8fd2b627f840f4f4b334c1b97745d8e42f13d090"
+}

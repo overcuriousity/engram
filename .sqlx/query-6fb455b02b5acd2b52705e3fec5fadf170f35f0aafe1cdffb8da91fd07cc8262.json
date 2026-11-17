@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", query AS \"query!\", query_vec AS \"query_vec!\", embed_model AS \"embed_model!\"\n                 FROM trails WHERE artifact_id = ? AND retired_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec!",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "embed_model"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6fb455b02b5acd2b52705e3fec5fadf170f35f0aafe1cdffb8da91fd07cc8262"
+}

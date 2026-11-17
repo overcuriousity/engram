@@ -1,11 +1,12 @@
 //! `Stage::Decisions`: lapse unanswered rows, close outcome windows, apply waiting acts, seat waiting asks,
 //! while the base is quiet, queue readings for the notes that have none, and queue relevance labels
-//! for recorded searches.
+//! for recorded searches, and while it stays quiet, queue deep looks at what searches left out.
 
 use crate::core::Core;
 use crate::core::judging::{reask_changed, settle_counted};
 use crate::error::Result;
 use crate::store::decision_log::{Logged, State};
+use crate::store::deep_looks::{DeepKind, DeepSource};
 use crate::store::jobs::Stage;
 
 /// Waiting acts looked at per sweep, highest top first.
@@ -22,6 +23,7 @@ pub struct Report {
     pub kept: u64,
     pub scanned: u64,
     pub labelled: u64,
+    pub deepened: u64,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -147,7 +149,21 @@ pub async fn run(core: &Core) -> Result<Report> {
     let left = core.judging_budget().await?;
     r.scanned = scan(core, left / 2).await?;
     r.labelled = label(core, left / 4).await?;
+    r.deepened = deepen(core, left / 4).await?;
+    core.refresh_model_trails_count().await;
+    // Best-effort: a trail left under the old model is only unused until the next quiet tick.
+    if quiet(core).await?
+        && let Err(e) = core.reembed_stale_trails().await
+    {
+        tracing::warn!(error = %e, "could not embed old trails again");
+    }
     Ok(r)
+}
+
+/// Nobody searched, asked or captured for `evolve.idle_secs`.
+async fn quiet(core: &Core) -> Result<bool> {
+    let idle = crate::store::now() - core.evolve.idle_secs.max(0);
+    Ok(!(core.store.activity_since(idle).await? || core.store.captured_since(idle).await?))
 }
 
 /// A store write about one decision. A failure is logged and that decision waits for the next
@@ -239,12 +255,92 @@ async fn label(core: &Core, share: usize) -> Result<u64> {
     Ok(armed)
 }
 
+/// Sources read per kind and sweep; the store leaves out what is looked at or not due, so
+/// these are ones still owed a look.
+pub const DEEPEN_LOOKAHEAD: i64 = 16;
+/// What a second reading is counted at: it asks about a decision's few notes, not a whole pool.
+const SECOND_READING_COST: usize = 4;
+
+/// Deep looks while quiet, within `share`: open gaps, weak decisions judged right, unjudged
+/// decisions, then searches the labeller left out. One looked at, waiting out a failure or queued
+/// is passed; the first may overrun the share when none is in flight, as `label`'s first does.
+async fn deepen(core: &Core, share: usize) -> Result<u64> {
+    if !core.learn.enabled || share == 0 || !quiet(core).await? {
+        return Ok(0);
+    }
+    let version = crate::core::judging::catalogue::answers_query("").version;
+    let (model, embed) = (core.decider.model(), core.embedder.model());
+    let store = &core.store;
+    let mut sources: Vec<DeepSource> = store
+        .open_gaps(embed, core.weak_below())
+        .await?
+        .gaps
+        .into_iter()
+        .map(|g| DeepSource {
+            kind: DeepKind::Gap(g.gap.kind),
+            id: g.gap.id,
+        })
+        .collect();
+    let of = |kind, ids: Vec<String>| ids.into_iter().map(move |id| DeepSource { kind, id });
+    sources.extend(of(
+        DeepKind::WeakRight,
+        store
+            .weak_right_decisions(embed, version, model, DEEPEN_LOOKAHEAD)
+            .await?,
+    ));
+    sources.extend(of(
+        DeepKind::SecondReading,
+        store
+            .decisions_unread(model, embed, version, DEEPEN_LOOKAHEAD)
+            .await?,
+    ));
+    let relevant_at = crate::jobs::label::relevant_at(core).await?;
+    // A search still open as a gap is looked at as that, not a second time as left out.
+    let gapped: std::collections::HashSet<String> = sources
+        .iter()
+        .filter(|s| matches!(s.kind, DeepKind::Gap(_)))
+        .map(|s| s.id.clone())
+        .collect();
+    sources.extend(of(
+        DeepKind::Labelled,
+        store
+            .searches_left_out(relevant_at, version, model, embed, DEEPEN_LOOKAHEAD)
+            .await?
+            .into_iter()
+            .filter(|id| !gapped.contains(id))
+            .collect(),
+    ));
+    let mut left = share;
+    let mut armed = 0;
+    // Looks already queued hold their cost, so two ticks cannot both spend the share.
+    let in_flight = store.queued_units(Stage::Deepen).await? > 0;
+    for s in sources {
+        if store.deep_looked(&s, version, model).await?
+            || !store.deep_look_due(&s, version, model).await?
+            || store.live_job(Stage::Deepen, &s.target()).await?
+        {
+            continue;
+        }
+        let cost = if s.kind == DeepKind::SecondReading {
+            SECOND_READING_COST
+        } else {
+            core.decide_cfg.deep_max
+        };
+        if cost > left && (armed > 0 || in_flight) {
+            break;
+        }
+        left = left.saturating_sub(cost);
+        crate::jobs::deepen::arm(core, &s).await?;
+        armed += 1;
+    }
+    Ok(armed)
+}
+
 /// Notes no reading has touched, newest first, while nobody searches, asks or captures. Within
 /// `share`, so the pair judge is never starved; a note already queued keeps its slot, and one that
 /// could not be read holds none: the store leaves it out until it is due again.
 async fn scan(core: &Core, share: usize) -> Result<u64> {
-    let idle = crate::store::now() - core.evolve.idle_secs.max(0);
-    if core.store.activity_since(idle).await? || core.store.captured_since(idle).await? {
+    if !quiet(core).await? {
         return Ok(0);
     }
     let half = i64::try_from(share).unwrap_or(i64::MAX);
@@ -272,6 +368,93 @@ async fn scan(core: &Core, share: usize) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A search a person called a gap, long ago and under the live embed model.
+    async fn old_gap(core: &Core) -> DeepSource {
+        let id = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: "where did it go".into(),
+                    door: crate::store::feedback::Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0, 0.0],
+                    embed_model: core.embedder.model().into(),
+                    candidates: vec![],
+                    answered: false,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store
+            .judge(
+                &id,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
+            .await
+            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = 1000 WHERE id = ?",
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        DeepSource {
+            kind: DeepKind::Gap(crate::store::gaps::GapKind::Search),
+            id,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_open_gap_is_armed_for_a_deep_look_when_quiet() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let s = old_gap(&core).await;
+        assert_eq!(deepen(&core, 60).await.unwrap(), 1);
+        assert!(
+            core.store
+                .live_job(Stage::Deepen, &s.target())
+                .await
+                .unwrap()
+        );
+        // Queued, it is passed, and it holds its share of the tick.
+        assert_eq!(deepen(&core, 60).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_armed_while_someone_searched_inside_the_idle_window() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let s = old_gap(&core).await;
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            crate::store::now(),
+            &s.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(deepen(&core, 60).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_source_already_looked_at_in_this_era_is_passed() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let s = old_gap(&core).await;
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        core.store
+            .put_deep_look(&s, &[], version, core.decider.model())
+            .await
+            .unwrap();
+        assert_eq!(deepen(&core, 60).await.unwrap(), 0);
+    }
 
     #[tokio::test]
     async fn the_sweep_is_always_armed_every_tick() {

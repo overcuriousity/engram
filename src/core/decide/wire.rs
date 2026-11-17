@@ -359,6 +359,10 @@ impl serde::Serialize for Decision {
         m.serialize_entry("answers", &held(self))?;
         m.serialize_entry("prior", &plain(&self.questions, &self.prior))?;
         m.serialize_entry("standing", &Standings(&self.standing))?;
+        // Absent means false, as a search hit's `weak`.
+        if self.weak {
+            m.serialize_entry("weak", &true)?;
+        }
         m.serialize_entry("evidence", &EvidenceList(&self.questions, &self.evidence))?;
         m.serialize_entry("read", &self.read)?;
         m.serialize_entry("dropped", &self.dropped)?;
@@ -538,6 +542,7 @@ mod tests {
             event_id: None,
             state: None,
             reads: vec![],
+            weak: false,
         }
     }
 
@@ -599,6 +604,18 @@ mod tests {
         assert_eq!(
             (v["event_id"].as_str(), v["state"].as_str()),
             (Some("ev-1"), Some("Excerpt 1"))
+        );
+    }
+
+    #[test]
+    fn weak_is_written_only_when_true() {
+        let mut d = held();
+        assert!(serde_json::to_value(&d).unwrap().get("weak").is_none());
+        d.weak = true;
+        let text = serde_json::to_string(&d).unwrap();
+        assert!(
+            text.contains(r#""verdict":"settled"},"weak":true"#),
+            "{text}"
         );
     }
 

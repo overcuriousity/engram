@@ -144,6 +144,8 @@ pub struct NewCandidate {
     pub band: bool,
     /// `None` unless the search explored. See `search_candidates`.
     pub explored_from: Option<i64>,
+    /// The trail that matched this note in the search; see `core::trails`.
+    pub trail_id: Option<String>,
 }
 
 /// Test-only: in production every field is a decision, so a new field must break every call site.
@@ -157,6 +159,7 @@ impl Default for NewCandidate {
             shown: false,
             band: false,
             explored_from: None,
+            trail_id: None,
         }
     }
 }
@@ -344,8 +347,8 @@ impl Store {
         for (rank, c) in ev.candidates.iter().enumerate() {
             sqlx::query!(
                 "INSERT INTO search_candidates
-                   (event_id, rank, artifact_id, score, similarity, shown, band, explored_from)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (event_id, rank, artifact_id, score, similarity, shown, band, explored_from, trail_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 &id,
                 rank as i64,
                 &c.artifact_id,
@@ -353,7 +356,8 @@ impl Store {
                 c.similarity,
                 c.shown as i64,
                 c.band as i64,
-                c.explored_from
+                c.explored_from,
+                c.trail_id
             )
             .execute(&mut *tx)
             .await?;
@@ -554,9 +558,29 @@ impl Store {
         .is_some())
     }
 
+    /// The notes a search showed.
+    pub async fn shown_notes(&self, event_id: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT DISTINCT artifact_id FROM search_candidates WHERE event_id = ? AND shown = 1",
+            event_id
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Named by the page, not guessed. The pool is checked for the artifact: an in-flight
     /// rewording may have folded over the row. `false` when gone, judged, or folded.
     pub async fn open_event(&self, event_id: &str, artifact_id: &str) -> Result<bool> {
+        Ok(self.open_event_first(event_id, artifact_id).await?.0)
+    }
+
+    /// `open_event`, and whether this was the search's first open: what is said once per search,
+    /// the observation and a trail's confirmation, is said on that one.
+    pub async fn open_event_first(
+        &self,
+        event_id: &str,
+        artifact_id: &str,
+    ) -> Result<(bool, bool)> {
         let generation = self.live_generation().await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
@@ -626,7 +650,8 @@ impl Store {
         }
 
         tx.commit().await?;
-        Ok(stamped)
+        let first = stamped && before.is_some_and(|r| r.opened_at.is_none());
+        Ok((stamped, first))
     }
 
     /// `AND judged_at IS NULL`: this clears the verdict, so a stale tab would delete a pair.

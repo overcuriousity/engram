@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM deep_look_failures WHERE source_kind = ? AND source_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ac9679ea2d922304a7beeb7d34922b8dbf216aba4a98eed860f027a7f68206f8"
+}

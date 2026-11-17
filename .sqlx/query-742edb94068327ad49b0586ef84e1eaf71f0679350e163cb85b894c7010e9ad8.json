@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT questions, standing, not_held AS \"not_held!: i64\", verdict FROM decide_events\n                WHERE decider = ? AND created_at > ? AND COALESCE(bears_version, 1) = ?",
+  "query": "SELECT questions, standing, not_held AS \"not_held!: i64\", weak AS \"weak!: i64\", verdict FROM decide_events\n                WHERE decider = ? AND created_at > ? AND COALESCE(bears_version, 1) = ?",
   "describe": {
     "columns": [
       {
@@ -37,8 +37,19 @@
         }
       },
       {
-        "name": "verdict",
+        "name": "weak!: i64",
         "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "weak"
+          }
+        }
+      },
+      {
+        "name": "verdict",
+        "ordinal": 4,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -55,8 +66,9 @@
       false,
       false,
       false,
+      false,
       true
     ]
   },
-  "hash": "3a89187151682b3cfc5bcfa95bfe19339c136a85fa0948ee3e0e24d0963934ba"
+  "hash": "742edb94068327ad49b0586ef84e1eaf71f0679350e163cb85b894c7010e9ad8"
 }
