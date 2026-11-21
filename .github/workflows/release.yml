@@ -160,7 +160,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6
         with: { distribution: temurin, java-version: "21" }
 
       # As in the android workflow: setup-android runs the gone `sdkmanager tools`.
@@ -286,7 +286,7 @@ jobs:
           sha256sum ./*.tar.gz ./*.apk ./install.sh > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'dist/*.tar.gz, dist/*.apk, dist/install.sh'
 
