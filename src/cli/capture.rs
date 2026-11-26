@@ -420,9 +420,11 @@ fn read_target(target: &str) -> Result<Read> {
         }
         Err(_) => return Ok(text(target.as_bytes().to_vec(), "text")),
     };
-    // The server sniffs the bytes anyway; guessing saves the common PDF-labelled-as-text case.
+    // The door reads three kinds; anything that is not a PDF or an image by name goes as text,
+    // and the server refuses bytes that are not.
     let mime = mime_guess::from_path(target)
         .first_raw()
+        .filter(|m| *m == "application/pdf" || m.starts_with("image/"))
         .unwrap_or("text/plain")
         .to_string();
     Ok(Read {
@@ -458,6 +460,21 @@ mod tests {
         assert_eq!(ids.len(), 1);
         let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
         assert!(stored.raw_text.contains("a procedure worth keeping"));
+    }
+
+    #[tokio::test]
+    async fn a_text_file_of_any_extension_lands_as_text() {
+        let (e, core) = endpoint().await;
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["notes.md", "rows.csv", "conf.yaml", "main.rs", "data.json"] {
+            let file = dir.path().join(name);
+            std::fs::write(&file, format!("what {name} held")).unwrap();
+            let ids = run(&e, &[file.display().to_string()], None, None, &off())
+                .await
+                .unwrap_or_else(|err| panic!("{name}: {err}"));
+            let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
+            assert!(stored.raw_text.contains(&format!("what {name} held")));
+        }
     }
 
     #[tokio::test]
