@@ -388,7 +388,7 @@ impl Control {
         Ok(())
     }
 
-    /// One transaction, credentials first, identity last. `sessions` and `api_tokens` have no
+    /// One transaction, credentials first, identity last. `sessions`, `api_tokens` and `pair_grants` have no
     /// foreign key to `users`, and a live token would re-provision the deleted account.
     pub async fn delete_user(&self, subject: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
@@ -397,6 +397,10 @@ impl Control {
             .execute(&mut *tx)
             .await?;
         sqlx::query!("DELETE FROM api_tokens WHERE subject = ?", subject)
+            .execute(&mut *tx)
+            .await?;
+        // An unclaimed code mints a token on claim, which would provision the account again.
+        sqlx::query!("DELETE FROM pair_grants WHERE subject = ?", subject)
             .execute(&mut *tx)
             .await?;
         let gone = sqlx::query!("DELETE FROM users WHERE subject = ?", subject)
@@ -476,6 +480,21 @@ mod tests {
         assert_ne!(a, slug_for("https://idp.example/sub|1235"));
         assert_eq!(a.len(), 16);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_takes_their_unclaimed_pairing_codes_too() {
+        let c = Control::memory().await.unwrap();
+        c.provision("sub-a", None).await.unwrap();
+        let code = crate::auth::grants::mint(&c, "sub-a").await.unwrap();
+
+        assert!(c.delete_user("sub-a").await.unwrap());
+
+        let left = sqlx::query_scalar!("SELECT COUNT(*) FROM pair_grants")
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "a code claimed now would bring the account back: {code}");
     }
 
     #[tokio::test]

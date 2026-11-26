@@ -4,17 +4,29 @@ use crate::store::auth::ApiToken;
 use crate::store::control::Control;
 use argon2::Argon2;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use base64::Engine;
 
 pub const TOKEN_PREFIX: &str = "engram_";
 
-fn hash_secret(secret: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(secret.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| Error::Store(format!("hashing failed: {e}")))
+const FAST: &str = "sha256:";
+
+/// SHA-256: the secret is 256 random bits, so a slow hash buys nothing, and this is paid on
+/// every bearer request. A password still gets argon2id (`local::hash_password`).
+fn hash_secret(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{FAST}{}", hex::encode(Sha256::digest(secret.as_bytes())))
+}
+
+/// `None` for a hash from before, which is argon2id and has to be checked off the executor.
+fn verify_fast(secret: &str, stored: &str) -> Option<bool> {
+    let want = stored.strip_prefix(FAST)?.as_bytes();
+    let hashed = hash_secret(secret);
+    let got = hashed[FAST.len()..].as_bytes();
+    // No early exit on the first differing byte.
+    let differ = want.len() != got.len()
+        || want.iter().zip(got).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0;
+    Some(!differ)
 }
 
 pub fn verify_secret(secret: &str, stored: &str) -> bool {
@@ -29,13 +41,13 @@ pub fn verify_secret(secret: &str, stored: &str) -> bool {
 /// How long a revoked token can still be restored.
 pub const RESTORE_WINDOW_SECS: i64 = 30 * 24 * 3600;
 
-/// `engram_<id>.<secret>`: the id addresses one row, the secret is argon2-verified against it.
+/// `engram_<id>.<secret>`: the id addresses one row, the secret is checked against its hash.
 fn parse(presented: &str) -> Option<(&str, &str)> {
     let (id, secret) = presented.strip_prefix(TOKEN_PREFIX)?.split_once('.')?;
     (!id.is_empty() && !secret.is_empty()).then_some((id, secret))
 }
 
-/// The plaintext is returned once; only the argon2id hash is stored.
+/// The plaintext is returned once; only its hash is stored.
 pub async fn mint(
     control: &Control,
     name: &str,
@@ -47,7 +59,7 @@ pub async fn mint(
     let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let id = crate::store::new_id();
     let row = control
-        .insert_token(&id, name, &hash_secret(&secret)?, subject, user_agent)
+        .insert_token(&id, name, &hash_secret(&secret), subject, user_agent)
         .await?;
     tracing::info!(token_id = %id, name, "api token minted");
     Ok((row, format!("{TOKEN_PREFIX}{id}.{secret}")))
@@ -60,7 +72,22 @@ pub async fn verify(control: &Control, presented: &str) -> Result<Identity> {
     let Some(t) = control.active_token(id).await? else {
         return Err(Error::Unauthorized);
     };
-    if !verify_secret(secret, &t.token_hash) {
+    let good = match verify_fast(secret, &t.token_hash) {
+        Some(good) => good,
+        None => {
+            // Minted before: argon2id is tens of milliseconds, so it runs off the executor,
+            // and a good one is rewritten so this is paid once per token.
+            let (given, stored) = (secret.to_string(), t.token_hash.clone());
+            let good = tokio::task::spawn_blocking(move || verify_secret(&given, &stored))
+                .await
+                .unwrap_or(false);
+            if good {
+                control.set_token_hash(&t.id, &hash_secret(secret)).await?;
+            }
+            good
+        }
+    };
+    if !good {
         return Err(Error::Unauthorized);
     }
     control.touch_token(&t.id).await?;
@@ -91,6 +118,39 @@ pub async fn restore(control: &Control, id: &str, subject: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::store::control::Control;
+
+    async fn stored_hash(s: &Control, id: &str) -> String {
+        s.active_token(id).await.unwrap().unwrap().token_hash
+    }
+
+    #[tokio::test]
+    async fn a_token_is_checked_without_a_password_hash() {
+        let s = Control::memory().await.unwrap();
+        let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
+        assert!(
+            stored_hash(&s, &row.id).await.starts_with("sha256:"),
+            "every bearer request pays for a slow hash over 256 random bits"
+        );
+        assert_eq!(verify(&s, &plaintext).await.unwrap().subject, "user-1");
+        let wrong = format!("{TOKEN_PREFIX}{}.{}", row.id, "A".repeat(43));
+        assert!(matches!(verify(&s, &wrong).await, Err(Error::Unauthorized)));
+    }
+
+    #[tokio::test]
+    async fn a_token_from_before_still_works_and_is_rewritten_on_first_use() {
+        let s = Control::memory().await.unwrap();
+        let old = crate::auth::local::hash_password("secret-from-before").unwrap();
+        s.insert_token("t-old", "laptop", &old, "user-1", None)
+            .await
+            .unwrap();
+        let presented = format!("{TOKEN_PREFIX}t-old.secret-from-before");
+
+        assert_eq!(verify(&s, &presented).await.unwrap().subject, "user-1");
+        assert!(stored_hash(&s, "t-old").await.starts_with("sha256:"));
+        assert_eq!(verify(&s, &presented).await.unwrap().subject, "user-1");
+        let wrong = format!("{TOKEN_PREFIX}t-old.not-the-secret");
+        assert!(matches!(verify(&s, &wrong).await, Err(Error::Unauthorized)));
+    }
 
     #[tokio::test]
     async fn a_minted_token_has_prefix_id_dot_secret() {
@@ -190,7 +250,7 @@ mod tests {
             .unwrap();
         assert!(!raw.contains(&plaintext));
         assert!(!raw.contains(plaintext.split_once('.').unwrap().1));
-        assert!(raw.starts_with("$argon2"));
+        assert!(raw.starts_with(FAST));
     }
 
     #[tokio::test]

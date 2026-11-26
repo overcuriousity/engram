@@ -116,8 +116,14 @@ async fn login_submit(
     };
     let cfg = st.auth.local.as_ref().ok_or(Error::NotFound)?;
 
-    let Some(identity) = crate::auth::local::check_credentials(cfg, &f.username, &f.password)
-    else {
+    // argon2id is tens of milliseconds of CPU: off the executor, so a guess stalls no stream.
+    let (local, username, password) = (cfg.clone(), f.username.clone(), f.password.clone());
+    let checked = tokio::task::spawn_blocking(move || {
+        crate::auth::local::check_credentials(&local, &username, &password)
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("sign-in check: {e}")))?;
+    let Some(identity) = checked else {
         tracing::warn!(username = %f.username, "failed local sign-in");
         return Ok((
             StatusCode::UNAUTHORIZED,
