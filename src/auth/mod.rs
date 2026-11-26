@@ -82,6 +82,14 @@ impl FromRequestParts<AppState> for Identity {
             return Ok(id.clone());
         }
         let id = Self::authenticate(parts, state).await?;
+        // Whatever carried the subject (a session, a token, a JWT): the list is the provider's
+        // door, and one taken off it is out at the next request.
+        if let Some(oidc) = &state.auth.oidc
+            && !oidc.still_admits(&id.subject)
+        {
+            tracing::warn!(subject = %id.subject, "no longer on the allow-list; refused");
+            return Err(Error::Unauthorized);
+        }
         parts.extensions.insert(id.clone());
         Ok(id)
     }

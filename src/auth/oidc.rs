@@ -85,6 +85,16 @@ pub fn is_allowed(cfg: &OidcConfig, subject: &str, groups: &[String]) -> bool {
     false
 }
 
+/// Asked on every request, so editing the list ends a session or a token and not only the next
+/// login. Groups arrive only at login: with a group list set, who came in through it cannot be
+/// told from who never did, and they stay in.
+pub fn still_allowed(cfg: &OidcConfig, subject: &str) -> bool {
+    if cfg.allowed_subs.iter().any(|s| s == subject) || !cfg.allowed_groups.is_empty() {
+        return true;
+    }
+    cfg.allowed_subs.is_empty() && cfg.open_registration
+}
+
 /// Absent `groups` (Nextcloud sends it only with group provisioning on) deserializes to an empty list.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct GroupClaims {
@@ -192,6 +202,11 @@ impl OidcClient {
 
     pub fn issuer(&self) -> &str {
         &self.cfg.issuer_url
+    }
+
+    /// See `still_allowed`.
+    pub fn still_admits(&self, subject: &str) -> bool {
+        still_allowed(&self.cfg, subject)
     }
 
     pub fn resource(&self) -> &str {
@@ -404,6 +419,15 @@ impl OidcClient {
 
 #[cfg(test)]
 pub(crate) async fn fake_client(base: &str) -> (wiremock::MockServer, OidcClient) {
+    fake_client_admitting(base, &[]).await
+}
+
+/// `subs` empty: open registration, as most tests want.
+#[cfg(test)]
+pub(crate) async fn fake_client_admitting(
+    base: &str,
+    subs: &[&str],
+) -> (wiremock::MockServer, OidcClient) {
     use wiremock::matchers::path;
     use wiremock::{Mock, ResponseTemplate};
     let server = wiremock::MockServer::start().await;
@@ -429,8 +453,8 @@ pub(crate) async fn fake_client(base: &str) -> (wiremock::MockServer, OidcClient
         client_id: "engram".into(),
         client_secret: None,
         scopes: vec!["openid".into()],
-        open_registration: true,
-        allowed_subs: vec![],
+        open_registration: subs.is_empty(),
+        allowed_subs: subs.iter().map(|s| s.to_string()).collect(),
         allowed_groups: vec![],
     };
     let client = OidcClient::discover(&cfg, base)
@@ -563,6 +587,18 @@ mod tests {
             axum::http::StatusCode::BAD_REQUEST,
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_subject_taken_off_the_list_is_no_longer_let_in() {
+        assert!(still_allowed(&cfg(&["sub-1"], &[]), "sub-1"));
+        assert!(!still_allowed(&cfg(&["sub-1"], &[]), "sub-2"));
+        assert!(!still_allowed(&cfg(&[], &[]), "sub-1"), "empty lists, registration shut");
+        let mut open = cfg(&[], &[]);
+        open.open_registration = true;
+        assert!(still_allowed(&open, "sub-1"));
+        // Groups arrive only at login, so a group list cannot say who came in through it.
+        assert!(still_allowed(&cfg_with_groups(&["sub-1"], &[], &["staff"]), "sub-2"));
     }
 
     #[test]

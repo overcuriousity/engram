@@ -652,6 +652,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_token_of_someone_taken_off_the_list_stops_working() {
+        let core = crate::core::test_support::test_core().await;
+        let (_, token) = crate::auth::tokens::mint(&core.store.control, "laptop", "user-1", None)
+            .await
+            .unwrap();
+        let status_as = |subs: &'static [&'static str]| {
+            let (core, token) = (core.clone(), token.clone());
+            async move {
+                let mut st =
+                    crate::web::test_support::state_over(core, crate::config::AuthMode::Oidc).await;
+                let base = st.auth.deployment.base();
+                let (_idp, client) = crate::auth::oidc::fake_client_admitting(&base, subs).await;
+                st.auth = std::sync::Arc::new(crate::web::state::AuthContext {
+                    mode: crate::config::AuthMode::Oidc,
+                    local: None,
+                    oidc: Some(client),
+                    pending: crate::auth::oidc::PendingStore::new(),
+                    deployment: st.auth.deployment.clone(),
+                });
+                crate::web::router(st)
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/status")
+                            .header("authorization", format!("Bearer {token}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(status_as(&["user-1"]).await, StatusCode::OK);
+        assert_eq!(
+            status_as(&["someone-else"]).await,
+            StatusCode::UNAUTHORIZED,
+            "the list was edited and the token went on working"
+        );
+    }
+
+    #[tokio::test]
     async fn guesses_spread_over_many_addresses_still_meet_a_ceiling() {
         use axum::extract::connect_info::MockConnectInfo;
         // OIDC mode refuses the form before any hashing, so only the limiters are at work.

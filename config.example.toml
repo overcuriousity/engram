@@ -230,8 +230,9 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 # scopes = ["openid", "profile", "email"]
 # Lets any subject the provider admits create a base here.
 # open_registration = false
+# Read on every request: a subject taken off is out at once, sessions and tokens included.
 # allowed_subs = ["sub-abc123"]
-# Needs the provider to send a `groups` claim.
+# Needs the provider to send a `groups` claim. Checked at login only.
 # allowed_groups = ["engram-users"]
 
 [consolidate]
