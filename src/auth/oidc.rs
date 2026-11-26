@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 /// Long enough for a slow provider, short enough that a leaked state value is useless.
 pub const PENDING_TTL_SECS: i64 = 600;
+pub const MAX_PENDING: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct PendingAuth {
@@ -29,14 +30,20 @@ impl PendingStore {
         }
     }
 
-    pub fn put(&self, p: PendingAuth) {
+    /// False when `MAX_PENDING` attempts are already waiting.
+    pub fn put(&self, p: PendingAuth) -> bool {
         let mut m = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cutoff = crate::store::now() - PENDING_TTL_SECS;
         m.retain(|_, v| v.created_at > cutoff);
+        // Anyone can begin a login; a full map refuses the newcomer and keeps the live attempts.
+        if m.len() >= MAX_PENDING {
+            return false;
+        }
         m.insert(p.csrf.clone(), p);
+        true
     }
 
     /// Single use: a replayed `state` finds nothing.
@@ -139,23 +146,32 @@ pub fn callback_url(base: &str) -> String {
     format!("{}/auth/callback", base.trim_end_matches('/'))
 }
 
+/// A provider that stalls must not hang start-up, a sign-in or a bearer check for ever.
+const IDP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn idp_http(
+    redirects: openidconnect::reqwest::redirect::Policy,
+    timeout: std::time::Duration,
+) -> Result<openidconnect::reqwest::Client> {
+    openidconnect::reqwest::ClientBuilder::new()
+        .redirect(redirects)
+        .timeout(timeout)
+        .build()
+        .map_err(|e| Error::Validation(e.to_string()))
+}
+
 impl OidcClient {
     pub async fn discover(cfg: &OidcConfig, base: &str) -> Result<OidcClient> {
         use openidconnect::IssuerUrl;
         use openidconnect::core::CoreProviderMetadata;
 
+        use openidconnect::reqwest::redirect::Policy;
         // Discovery follows redirects: Nextcloud's nginx recipe 301s the bare .well-known path.
-        let discovery_http = openidconnect::reqwest::ClientBuilder::new()
-            .redirect(openidconnect::reqwest::redirect::Policy::limited(5))
-            .build()
-            .map_err(|e| Error::Validation(e.to_string()))?;
+        let discovery_http = idp_http(Policy::limited(5), IDP_TIMEOUT)?;
 
         // No redirects after discovery: on 307/308 reqwest would replay `client_secret`,
         // the code or the access token to the redirect target.
-        let http = openidconnect::reqwest::ClientBuilder::new()
-            .redirect(openidconnect::reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| Error::Validation(e.to_string()))?;
+        let http = idp_http(Policy::none(), IDP_TIMEOUT)?;
 
         let issuer = IssuerUrl::new(cfg.issuer_url.clone())
             .map_err(|e| Error::Validation(format!("issuer_url: {e}")))?;
@@ -194,12 +210,14 @@ impl OidcClient {
             .get(uri)
             .send()
             .await
-            .map_err(|e| Error::Validation(format!("JWKS unavailable: {e}")))?
+            .map_err(|e| Error::Internal(format!("JWKS unavailable: {e}")))?
             .bytes()
             .await
-            .map_err(|e| Error::Validation(format!("JWKS unavailable: {e}")))?;
+            .map_err(|e| Error::Internal(format!("JWKS unavailable: {e}")))?;
+        // The provider's trouble, not the bearer's: a 5xx, so a client retries and does not drop
+        // its token.
         let set: jsonwebtoken::jwk::JwkSet = serde_json::from_slice(&body)
-            .map_err(|e| Error::Validation(format!("JWKS unreadable: {e}")))?;
+            .map_err(|e| Error::Internal(format!("JWKS unreadable: {e}")))?;
         *self.jwks.write().await = Some((set.clone(), std::time::Instant::now()));
         Ok(set)
     }
@@ -504,6 +522,64 @@ mod tests {
         ));
         assert!(!is_allowed(&c, "sub-9", &["other-group".to_string()]));
         assert!(!is_allowed(&c, "sub-9", &[]));
+    }
+
+    #[tokio::test]
+    async fn an_identity_provider_that_stalls_is_not_waited_for() {
+        use wiremock::{Mock, ResponseTemplate};
+        let idp = wiremock::MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3)))
+            .mount(&idp)
+            .await;
+        let http = idp_http(
+            openidconnect::reqwest::redirect::Policy::none(),
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+        let err = http.get(idp.uri()).send().await.unwrap_err();
+        assert!(err.is_timeout(), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_key_set_that_cannot_be_read_is_not_the_callers_mistake() {
+        use base64::Engine;
+        use wiremock::{Mock, ResponseTemplate};
+        let (idp, client) = fake_client("https://engram.test").await;
+        idp.reset().await;
+        Mock::given(wiremock::matchers::path("/jwks"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("down"))
+            .mount(&idp)
+            .await;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let token = format!(
+            "{}.{}.sig",
+            b64.encode(r#"{"alg":"RS256","kid":"k1"}"#),
+            b64.encode("{}")
+        );
+        let err = client.verify_jwt(&token).await.unwrap_err();
+        assert_ne!(
+            err.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_pending_attempts_are_bounded() {
+        let store = PendingStore::new();
+        let attempt = |n: usize| PendingAuth {
+            csrf: format!("state-{n}"),
+            nonce: "n".into(),
+            pkce_verifier: "v".into(),
+            created_at: crate::store::now(),
+            next: None,
+        };
+        for n in 0..MAX_PENDING {
+            assert!(store.put(attempt(n)));
+        }
+        assert!(!store.put(attempt(MAX_PENDING)), "the map grows with every request");
+        assert!(store.take("state-0").is_some(), "a refused attempt pushed a live one out");
     }
 
     #[test]
