@@ -850,7 +850,7 @@ async fn get_file(
             (axum::http::header::CONTENT_TYPE, mime),
             (
                 axum::http::header::CACHE_CONTROL,
-                "private, max-age=3600".to_string(),
+                crate::web::etag::REVALIDATE.to_string(),
             ),
             (axum::http::header::ETAG, tag),
         ],
@@ -898,7 +898,7 @@ async fn get_image(
             (axum::http::header::CONTENT_TYPE, mime),
             (
                 axum::http::header::CACHE_CONTROL,
-                "private, max-age=3600".to_string(),
+                crate::web::etag::REVALIDATE.to_string(),
             ),
             (axum::http::header::ETAG, tag),
         ],
@@ -3017,6 +3017,8 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(res.headers()["content-type"], "application/pdf");
+        // Revalidated, so the bytes do not outlive a sign-out in the browser's cache.
+        assert_eq!(res.headers()["cache-control"], crate::web::etag::REVALIDATE);
         let got = axum::body::to_bytes(res.into_body(), usize::MAX)
             .await
             .unwrap();

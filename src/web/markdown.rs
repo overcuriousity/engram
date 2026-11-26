@@ -81,6 +81,23 @@ fn math(latex: &str, display: MathDisplay) -> Event<'static> {
     }
 }
 
+/// The classes the renderer writes itself: a fence's language and the footnote marks. Raw HTML
+/// in the text may carry no other, or it borrows the app's own to position and hide things.
+fn renderers_own(element: &str, class: &str) -> bool {
+    match element {
+        "code" => class.strip_prefix("language-").is_some_and(|lang| {
+            !lang.is_empty()
+                && lang
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+-_.#".contains(c))
+        }),
+        _ => matches!(
+            class,
+            "footnote-reference" | "footnote-definition" | "footnote-definition-label"
+        ),
+    }
+}
+
 /// Chunk text is model-written and shown in an authenticated session, so it is sanitized after rendering.
 pub fn render(markdown: &str) -> String {
     let parser = Parser::new_ext(markdown, options()).map(|event| match event {
@@ -96,6 +113,16 @@ pub fn render(markdown: &str) -> String {
         .add_tags(MATHML_TAGS)
         .add_generic_attributes(["class"])
         .add_generic_attributes(MATHML_ATTRIBUTES)
+        .attribute_filter(|element, attribute, value| {
+            if attribute != "class" {
+                return Some(value.into());
+            }
+            let own: Vec<&str> = value
+                .split_whitespace()
+                .filter(|class| renderers_own(element, class))
+                .collect();
+            (!own.is_empty()).then(|| own.join(" ").into())
+        })
         .url_schemes(["http", "https", "mailto"].into_iter().collect())
         .clean(&unsafe_html)
         .to_string()
@@ -195,6 +222,16 @@ pub fn inert(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_content_cannot_borrow_the_apps_own_classes() {
+        // A captured page or a model can write raw HTML; the app's classes position and hide.
+        let html = render("<div class=\"oc-fab menu\">Sign in again</div>\n\n<p class=\"hidden\">x</p>");
+        assert!(!html.contains("oc-fab") && !html.contains("hidden"), "{html}");
+        assert!(html.contains("Sign in again"));
+        let code = render("```rust\nfn main() {}\n```");
+        assert!(code.contains("class=\"language-rust\""), "{code}");
+    }
 
     #[test]
     fn renders_headings_lists_and_fenced_code() {
