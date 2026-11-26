@@ -61,7 +61,11 @@ async fn app_page(_tenant: Tenant, State(st): State<AppState>) -> Response {
     .into_response()
 }
 
-async fn app_grant(tenant: Tenant, State(st): State<AppState>) -> UiResult<Response> {
+async fn app_grant(
+    _here: crate::web::tenant::InBrowser,
+    tenant: Tenant,
+    State(st): State<AppState>,
+) -> UiResult<Response> {
     let origin = st.auth.deployment.base();
     let code = crate::auth::grants::mint(&tenant.core.store.control, &tenant.user.subject).await?;
     // Validated at load; `ok().flatten()` so a page cannot panic over config.

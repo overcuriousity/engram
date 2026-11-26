@@ -85,6 +85,7 @@ async fn pair_page(
 }
 
 async fn pair_submit(
+    _here: crate::web::tenant::InBrowser,
     tenant: Tenant,
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -163,7 +164,9 @@ mod tests {
 
     #[tokio::test]
     async fn pairing_mints_a_working_token_and_hands_it_back_through_the_browser() {
-        let (app, token, core) = crate::web::api::tests::app_token_and_core().await;
+        // A person presses Pair in their signed-in browser; a bearer may not mint a token.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core.clone()).await;
         let redirect = "https://abcdefg.chromiumapp.org/";
         let res = app
             .oneshot(
@@ -171,7 +174,7 @@ mod tests {
                     .uri("/ui/pair")
                     .method("POST")
                     .header("host", "engram.example")
-                    .header("authorization", format!("Bearer {token}"))
+                    .header("cookie", cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(format!(
                         "redirect_uri={}&state=nonce123",
@@ -242,14 +245,15 @@ mod tests {
 
     #[tokio::test]
     async fn pairing_refuses_a_redirect_that_is_not_an_extension() {
-        let (app, token, _core) = crate::web::api::tests::app_token_and_core().await;
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         let res = app
             .oneshot(
                 Request::builder()
                     .uri("/ui/pair")
                     .method("POST")
                     .header("host", "engram.example")
-                    .header("authorization", format!("Bearer {token}"))
+                    .header("cookie", cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(
                         "redirect_uri=https%3A%2F%2Fevil.test%2F&state=x",
