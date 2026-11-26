@@ -521,3 +521,38 @@ fn no_background_judgement_is_made_by_a_chat_model() {
     }
     assert!(left.is_empty(), "{}", left.join("\n"));
 }
+
+fn tracked(path: &str) -> String {
+    fs::read_to_string(root().join(path)).unwrap()
+}
+
+#[test]
+fn a_release_follows_only_a_push_to_this_repository() {
+    let y = tracked(".github/workflows/release.yml");
+    let gate = y
+        .lines()
+        .find(|l| l.trim_start().starts_with("if:") && l.contains("workflow_run.conclusion"))
+        .expect("the version job's gate");
+    for wanted in [
+        "github.event.workflow_run.event == 'push'",
+        "github.event.workflow_run.head_repository.full_name == github.repository",
+    ] {
+        assert!(gate.contains(wanted), "the release gate lacks `{wanted}`");
+    }
+}
+
+#[test]
+fn vendoring_keeps_what_the_archive_already_holds() {
+    for path in [".github/workflows/release.yml", "scripts/bundle.sh"] {
+        for line in tracked(path).lines().filter(|l| l.contains("cargo vendor ")) {
+            assert!(line.contains("--no-delete"), "{path}: {}", line.trim());
+        }
+    }
+}
+
+#[test]
+fn a_docs_only_release_is_judged_against_the_last_tag() {
+    let y = tracked(".github/workflows/release.yml");
+    assert!(!y.contains("git diff --name-only HEAD^ HEAD"));
+    assert!(y.contains("git describe --tags --abbrev=0"));
+}

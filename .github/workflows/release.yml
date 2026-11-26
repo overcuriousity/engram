@@ -22,7 +22,8 @@ jobs:
   version:
     name: version
     # Failed, cancelled and skipped CI runs reach here too.
-    if: github.event.workflow_run.conclusion == 'success'
+    # A pull request's CI run from a fork's `master` matches `branches` too; only our own push releases.
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pick.outputs.version }}
@@ -32,7 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-          # The counter reads today's tags; the docs-only check needs the parent commit.
+          # The counter reads today's tags; the docs-only check reads back to the last one.
           fetch-depth: 0
 
       - name: Pick the version
@@ -54,14 +55,14 @@ jobs:
             exit 1
           fi
 
-          # A commit touching only markdown and docs/ is not a release.
-          if git rev-parse HEAD^ >/dev/null 2>&1; then
-            changed=$(git diff --name-only HEAD^ HEAD)
+          # A push touching only markdown and docs/ since the last release is not one: a push holds several commits.
+          if last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null); then
+            changed=$(git diff --name-only "$last" HEAD)
           else
             changed=$(git ls-tree --name-only -r HEAD)
           fi
           # A here-string, not `echo |`: `grep -q` stops early, and under `pipefail` the broken pipe read as "docs only".
-          if grep -qvE '(\.md$|^docs/)' <<<"$changed"; then
+          if [ -n "$changed" ] && grep -qvE '(\.md$|^docs/)' <<<"$changed"; then
             release=yes
           else
             release=no
@@ -265,7 +266,9 @@ jobs:
           mkdir -p src-dist/src/.cargo
           git archive --format=tar HEAD | tar -C src-dist/src -xf -
           cp CHANGELOG.md src-dist/src/CHANGELOG.md
-          cargo vendor --locked --versioned-dirs src-dist/src/vendor | sed 's|^directory = .*|directory = "vendor"|' > src-dist/src/.cargo/config.toml
+          cargo vendor --locked --versioned-dirs --no-delete src-dist/src/vendor | sed 's|^directory = .*|directory = "vendor"|' > src-dist/src/.cargo/config.toml
+          # `include_bytes!` and the whisper build read these; an archive without them cannot compile.
+          test -f src-dist/src/vendor/tokenizer.json && test -d src-dist/src/vendor/whisper.cpp
           tar -C src-dist -czf "dist/engram-$v-src-vendored.tar.gz" --transform "s|^src|engram-$v|" src
           cp install.sh dist/install.sh
 

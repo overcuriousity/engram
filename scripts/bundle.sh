@@ -15,7 +15,8 @@ if [ -z "${SKIP_SOURCE:-}" ]; then
   mkdir -p "$dist/src/.cargo"
   git archive --format=tar HEAD | tar -C "$dist/src" -xf -
   # The printed source replacement points at the build path; inside the archive it is ./vendor.
-  cargo vendor --locked --versioned-dirs "$dist/src/vendor" | sed 's|^directory = .*|directory = "vendor"|' > "$dist/src/.cargo/config.toml"
+  cargo vendor --locked --versioned-dirs --no-delete "$dist/src/vendor" | sed 's|^directory = .*|directory = "vendor"|' > "$dist/src/.cargo/config.toml"
+  test -f "$dist/src/vendor/tokenizer.json" && test -d "$dist/src/vendor/whisper.cpp"
   tar -C "$dist" -czf "$out/engram-$version-src-vendored.tar.gz" --transform "s|^src|engram-$version|" src
 fi
 

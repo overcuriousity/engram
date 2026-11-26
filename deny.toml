@@ -8,6 +8,8 @@ yanked = "deny"
 # Unmaintained transitive crates are reported, not failed: the same policy cargo-audit ran with.
 unmaintained = "workspace"
 # Every ignore carries its reachability argument; delete an entry once a fixed version is reachable.
+# Not ignored, on the owner's word: RUSTSEC-2026-0543 (chrono) and -0555 (chrono-tz) are unmaintained
+# notices with no upstream fix. The check stays red until engram moves to another time crate (ROADMAP).
 ignore = [
   { id = "RUSTSEC-2023-0071", reason = "rsa via openidconnect and jsonwebtoken: Marvin needs private-key decryption or signing; engram only verifies IdP signatures with public keys and authenticates with client_secret." },
   { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.31 via docling -> calamine: only the xls/xlsx backends use it, and engram passes docling InputFormat::Pdf only (src/core/pdf.rs)." },
@@ -17,6 +19,8 @@ ignore = [
   { id = "RUSTSEC-2026-0368", reason = "zip 2.4 extract symlinks: as RUSTSEC-2026-0367, nothing extracts." },
   { id = "RUSTSEC-2026-0369", reason = "zip 2.4 extract permissions: as RUSTSEC-2026-0367, nothing extracts." },
   { id = "RUSTSEC-2026-0429", reason = "zip 2.4 extract symlink size: as RUSTSEC-2026-0367, nothing extracts." },
+  { id = "RUSTSEC-2026-0545", reason = "zip 2.4 AES entries via docling/calamine: as RUSTSEC-2026-0367, their zip backends are never reached; engram's own zip is 9.x, a build dependency that only writes." },
+  { id = "RUSTSEC-2026-0548", reason = "zip 2.4 ZipStreamReader via docling/calamine: as RUSTSEC-2026-0367, nothing extracts; engram's own zip is past the fix, a build dependency that only writes." },
   { id = "RUSTSEC-2026-0459", reason = "SQLite < 3.54 via libsqlite3-sys 0.37 (sqlx-sqlite 0.9 admits no newer): needs a foreign -wal beside a database; engram opens only databases it wrote, backups are VACUUM INTO, and restore deletes -wal/-shm before renaming (src/backup/sqlite.rs)." },
 ]
 
