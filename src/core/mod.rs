@@ -514,7 +514,10 @@ impl Core {
             learn: cfg.learn.clone(),
             decide_cfg: cfg.decide.clone(),
             feedback: cfg.feedback.clone(),
-            capture: cfg.capture.clone(),
+            capture: crate::config::CaptureConfig {
+                fetch_private: Some(cfg.fetch_reaches_private()),
+                ..cfg.capture.clone()
+            },
             associate: cfg.associate.clone(),
             activation: cfg.activation.clone(),
             promote: cfg.promote.clone(),
@@ -804,7 +807,10 @@ pub mod test_support {
             },
             decide_cfg: crate::config::DecideConfig::default(),
             feedback: crate::config::FeedbackConfig::default(),
-            capture: crate::config::CaptureConfig::default(),
+            capture: crate::config::CaptureConfig {
+                fetch_private: Some(true),
+                ..Default::default()
+            },
             associate: crate::config::AssociateConfig::default(),
             activation: crate::config::ActivationConfig::default(),
             promote: crate::config::PromoteConfig::default(),

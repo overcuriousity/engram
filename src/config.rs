@@ -67,6 +67,9 @@ pub struct CaptureConfig {
     pub image_preview_edge: u32,
     /// Bytes an uploaded PDF may weigh (the upload door's own ceiling); no page cap.
     pub pdf_max_bytes: usize,
+    /// Whether a fetch may reach loopback, link-local and private addresses. Unset: yes for
+    /// the one operator of local mode, no under OIDC; see `Config::fetch_reaches_private`.
+    pub fetch_private: Option<bool>,
 }
 
 impl Default for CaptureConfig {
@@ -78,6 +81,7 @@ impl Default for CaptureConfig {
             image_max_bytes: 25 * 1024 * 1024,
             image_preview_edge: 2048,
             pdf_max_bytes: 50 * 1024 * 1024,
+            fetch_private: None,
         }
     }
 }
@@ -2413,6 +2417,14 @@ impl Config {
     /// A `Config` with every role configured and nothing reachable; not `cfg(test)` because
     /// integration tests compile against the crate.
     #[doc(hidden)]
+    /// The operator's word where given; else open for the one operator of local mode, and
+    /// closed under OIDC, where any signed-in user would read the server's network through it.
+    pub fn fetch_reaches_private(&self) -> bool {
+        self.capture
+            .fetch_private
+            .unwrap_or(self.auth.mode == AuthMode::Local)
+    }
+
     pub fn test_default() -> Config {
         Config {
             evolve: EvolveConfig::default(),
@@ -2640,6 +2652,20 @@ mod tests {
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn a_fetch_reaches_the_local_network_for_one_operator_and_not_for_several() {
+        let mut cfg = Config::test_default();
+        cfg.auth.mode = AuthMode::Local;
+        assert!(cfg.fetch_reaches_private());
+        cfg.auth.mode = AuthMode::Oidc;
+        assert!(!cfg.fetch_reaches_private(), "any signed-in user reads the server's network");
+        cfg.capture.fetch_private = Some(true);
+        assert!(cfg.fetch_reaches_private(), "the operator's own word is overruled");
+        cfg.auth.mode = AuthMode::Local;
+        cfg.capture.fetch_private = Some(false);
+        assert!(!cfg.fetch_reaches_private());
     }
 
     #[test]

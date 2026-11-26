@@ -48,6 +48,85 @@ pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
     }
 }
 
+/// This machine or its network rather than the internet: loopback, private, link-local,
+/// carrier NAT, multicast and the unspecified address, in either family.
+pub(crate) fn inward(ip: std::net::IpAddr) -> bool {
+    let v4 = |a: std::net::Ipv4Addr| {
+        let o = a.octets();
+        a.is_loopback()
+            || a.is_private()
+            || a.is_link_local()
+            || a.is_unspecified()
+            || a.is_broadcast()
+            || a.is_multicast()
+            || (o[0] == 100 && o[1] & 0xc0 == 64)
+    };
+    match ip {
+        std::net::IpAddr::V4(a) => v4(a),
+        std::net::IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(mapped) => v4(mapped),
+            None => {
+                let head = a.segments()[0];
+                a.is_loopback()
+                    || a.is_unspecified()
+                    || a.is_multicast()
+                    || head & 0xfe00 == 0xfc00
+                    || head & 0xffc0 == 0xfe80
+            }
+        },
+    }
+}
+
+/// A hop whose host is an inward address written out; a name is the resolver's to vet.
+fn names_inward(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(a)) => inward(a.into()),
+        Some(url::Host::Ipv6(a)) => inward(a.into()),
+        _ => false,
+    }
+}
+
+/// What a closed fetcher answers; typed so `fetch` can tell it from a network fault.
+#[derive(Debug)]
+struct Inward;
+
+impl std::fmt::Display for Inward {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "that address is on the server's own network; `[capture] fetch_private = true` opens it",
+        )
+    }
+}
+
+impl std::error::Error for Inward {}
+
+fn refused_inward(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut at = Some(e);
+    while let Some(err) = at {
+        if err.is::<Inward>() {
+            return true;
+        }
+        at = err.source();
+    }
+    false
+}
+
+/// Vets what a name resolves to at connect time, so a redirect and a rebound name are caught.
+struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let found = tokio::net::lookup_host((name.as_str(), 0)).await?;
+            let public: Vec<std::net::SocketAddr> = found.filter(|a| !inward(a.ip())).collect();
+            if public.is_empty() {
+                return Err(Inward.into());
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
 /// Some servers refuse anonymous clients.
 pub const USER_AGENT: &str = concat!(
     "engram/",
@@ -57,9 +136,13 @@ pub const USER_AGENT: &str = concat!(
 
 /// Retrieve a page, PDF or image for paste-a-link and MCP, as an anonymous client.
 /// Failures are `Error::Validation` (400): the URL is operator input on an authenticated endpoint.
-/// Private addresses are not blocked: the single authenticated operator runs the machine.
+/// Private addresses are reached only where `fetch_private` says so; unset is closed.
 pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
     ensure_readable(url)?;
+    let open = cfg.fetch_private.unwrap_or(false);
+    if !open && names_inward(url) {
+        return Err(Error::Validation(Inward.to_string()));
+    }
 
     // Wikipedia answers the default `reqwest/x.y` agent with a 403.
     let mut headers = reqwest::header::HeaderMap::new();
@@ -69,21 +152,39 @@ pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
             "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
         ),
     );
-    let client = reqwest::Client::builder()
+    // A redirect chain that never ends is a timeout dressed up as progress. Ten is what every
+    // other client settles on.
+    const HOPS: usize = 10;
+    let mut builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .default_headers(headers)
-        .timeout(std::time::Duration::from_secs(cfg.fetch_timeout_secs))
-        // A redirect chain that never ends is a timeout dressed up as
-        // progress. Ten is what every other client settles on.
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(cfg.fetch_timeout_secs));
+    builder = if open {
+        builder.redirect(reqwest::redirect::Policy::limited(HOPS))
+    } else {
+        builder
+            .dns_resolver(std::sync::Arc::new(PublicOnly))
+            .redirect(reqwest::redirect::Policy::custom(|hop| {
+                if hop.previous().len() >= HOPS {
+                    hop.error("too many redirects")
+                } else if names_inward(hop.url()) {
+                    hop.error(Inward)
+                } else {
+                    hop.follow()
+                }
+            }))
+    };
+    let client = builder
         .build()
         .map_err(|e| Error::Validation(format!("could not build a client: {e}")))?;
 
-    let mut res = client
-        .get(url.clone())
-        .send()
-        .await
-        .map_err(|e| Error::Validation(format!("fetch failed: {e}")))?;
+    let mut res = client.get(url.clone()).send().await.map_err(|e| {
+        if refused_inward(&e) {
+            Error::Validation(Inward.to_string())
+        } else {
+            Error::Validation(format!("fetch failed: {e}"))
+        }
+    })?;
 
     if !res.status().is_success() {
         return Err(Error::Validation(format!(
@@ -166,8 +267,66 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Open, as local mode is: the mock servers below listen on loopback.
     fn cfg() -> CaptureConfig {
-        CaptureConfig::default()
+        CaptureConfig {
+            fetch_private: Some(true),
+            ..CaptureConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_fetcher_refuses_the_servers_own_network() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("<p>internal</p>", "text/html"))
+            .mount(&server)
+            .await;
+        let closed = CaptureConfig {
+            fetch_private: Some(false),
+            ..CaptureConfig::default()
+        };
+        let port = server.address().port();
+        // A literal address, a name that resolves inward, and no setting at all.
+        for (target, cfg) in [
+            (format!("http://127.0.0.1:{port}/"), closed.clone()),
+            (format!("http://localhost:{port}/"), closed.clone()),
+            (format!("http://[::1]:{port}/"), closed),
+            (format!("http://127.0.0.1:{port}/"), CaptureConfig::default()),
+        ] {
+            let u = url::Url::parse(&target).unwrap();
+            let got = fetch(&u, &cfg).await;
+            assert!(
+                matches!(got, Err(Error::Validation(_))),
+                "{target} was read: {:?}",
+                got.map(|_| ())
+            );
+        }
+    }
+
+    #[test]
+    fn a_hop_that_names_an_inward_address_outright_is_recognised() {
+        // A name goes through the resolver on every hop; a literal address never does.
+        for u in ["http://127.0.0.1/x", "http://[::1]:8080/", "https://10.0.0.5/", "http://[::ffff:192.168.0.1]/"] {
+            assert!(names_inward(&url::Url::parse(u).unwrap()), "{u}");
+        }
+        for u in ["http://example.org/", "http://93.184.216.34/"] {
+            assert!(!names_inward(&url::Url::parse(u).unwrap()), "{u}");
+        }
+    }
+
+    #[test]
+    fn inward_is_everything_that_is_not_the_public_internet() {
+        for ip in [
+            "127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.5", "169.254.169.254",
+            "100.64.0.1", "0.0.0.0", "255.255.255.255", "224.0.0.1", "::1", "::", "fc00::1", "fd12::1",
+            "fe80::1", "ff02::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1",
+        ] {
+            assert!(inward(ip.parse().unwrap()), "{ip} counts as public");
+        }
+        for ip in ["93.184.216.34", "172.32.0.1", "100.128.0.1", "2606:4700::1111", "::ffff:8.8.8.8"] {
+            assert!(!inward(ip.parse().unwrap()), "{ip} counts as inward");
+        }
     }
 
     #[tokio::test]
@@ -323,12 +482,12 @@ mod tests {
         let u = url::Url::parse(&format!("{}/doc.pdf", server.uri())).unwrap();
         let page_small = CaptureConfig {
             fetch_max_bytes: 1024,
-            ..CaptureConfig::default()
+            ..cfg()
         };
         assert!(fetch(&u, &page_small).await.is_ok());
         let pdf_small = CaptureConfig {
             pdf_max_bytes: 1024,
-            ..CaptureConfig::default()
+            ..cfg()
         };
         let err = fetch(&u, &pdf_small).await.unwrap_err();
         assert!(
@@ -365,7 +524,7 @@ mod tests {
         let u = url::Url::parse(&format!("{}/big", server.uri())).unwrap();
         let small = CaptureConfig {
             fetch_max_bytes: 1024,
-            ..CaptureConfig::default()
+            ..cfg()
         };
         let err = fetch_html(&u, &small).await.unwrap_err();
         assert!(

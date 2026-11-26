@@ -397,6 +397,9 @@ idle_secs = 1800
 fetch_timeout_secs = 30
 # Bytes read from a fetched URL.
 fetch_max_bytes = 8388608
+# Whether a fetched link may point at loopback, link-local or private addresses.
+# Unset: yes in local mode, no under OIDC.
+# fetch_private = false
 # Extractions shorter than this are refused as a login wall or banner.
 min_extracted_chars = 200
 image_max_bytes = 26214400
