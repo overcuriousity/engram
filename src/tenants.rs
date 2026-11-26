@@ -84,6 +84,8 @@ pub struct Tenants {
     /// The working state each subject keeps across eviction, since `open` builds a fresh `Core` on
     /// every miss. Dropped once `Working::is_idle`; see `working_for`.
     working: Mutex<HashMap<String, crate::core::Working>>,
+    /// The gate and the decode permits every tenant's `Core` is built in front of.
+    shared: crate::core::Shared,
     live: Mutex<HashMap<String, crate::web::live::Live>>,
     /// Whether one tenant answers for every subject; see `Tenants::single`.
     solo: bool,
@@ -102,6 +104,7 @@ enum Trigger {
 impl Tenants {
     pub fn new(cfg: Arc<Config>, control: Control, vectors: Arc<dyn VectorFactory>) -> Tenants {
         Tenants {
+            shared: crate::core::Shared::new(&cfg),
             cfg,
             control,
             vectors,
@@ -308,11 +311,12 @@ impl Tenants {
     /// This subject's working memory across eviction; a poisoned map yields fresh state. Dropped
     /// only when no `Core` holds it and no sitting is warm.
     fn working_for(&self, subject: &str) -> crate::core::Working {
+        let fresh = || crate::core::Working::new(self.shared.clone());
         let Ok(mut map) = self.working.lock() else {
-            return crate::core::Working::default();
+            return fresh();
         };
         map.retain(|s, w| s == subject || !w.is_idle());
-        map.entry(subject.to_string()).or_default().clone()
+        map.entry(subject.to_string()).or_insert_with(fresh).clone()
     }
 
     fn live_for(&self, subject: &str) -> crate::web::live::Live {
@@ -628,6 +632,29 @@ mod tests {
         let again = t.get_or_provision("sub-a", None).await.unwrap();
         assert_eq!(again.user.slug, crate::store::control::slug_for("sub-a"));
         assert_eq!(t.control().users().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn every_tenant_waits_at_the_one_gate() {
+        let (_t, a, b, _dir) = two_tenants().await;
+        assert!(
+            std::sync::Arc::ptr_eq(&a.core.gate, &b.core.gate),
+            "two users generate at once on the one set of endpoints"
+        );
+        assert!(std::sync::Arc::ptr_eq(&a.core.decodes, &b.core.decodes));
+    }
+
+    #[tokio::test]
+    async fn a_reopened_tenant_takes_the_locks_it_held_before() {
+        let (t, _dir) = test_tenants(1).await;
+        let a = t.get_or_provision("sub-a", None).await.unwrap();
+        t.get_or_provision("sub-b", None).await.unwrap();
+        let again = t.get_or_provision("sub-a", None).await.unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&a.core.lifecycle_lock, &again.core.lifecycle_lock),
+            "a repair pass and a request lock two different things"
+        );
+        assert!(std::sync::Arc::ptr_eq(&a.core.corpus_locks, &again.core.corpus_locks));
     }
 
     #[tokio::test]

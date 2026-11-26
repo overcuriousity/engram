@@ -54,15 +54,44 @@ pub struct Working {
     pub line: Arc<std::sync::atomic::AtomicU32>,
     /// Held here so a transient `Core` spends the same tick as the serving one.
     pub calls: Arc<crate::core::judging::Meter>,
+    /// Held here so a repair pass on a transient `Core` excludes the request it races.
+    pub corpus_locks: CorpusLocks,
+    pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The process's, not the subject's: one set of endpoints and one machine serve every tenant.
+    pub shared: Shared,
 }
 
-impl Default for Working {
-    fn default() -> Self {
+/// What every tenant of one process waits at.
+#[derive(Clone)]
+pub struct Shared {
+    pub gate: Arc<crate::infer::gate::InferenceGate>,
+    pub decodes: Arc<tokio::sync::Semaphore>,
+}
+
+impl Shared {
+    pub fn new(cfg: &Config) -> Shared {
+        Shared {
+            gate: Arc::new(crate::infer::gate::InferenceGate::new(
+                std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
+            )),
+            decodes: Arc::new(tokio::sync::Semaphore::new(
+                crate::core::image::MAX_CONCURRENT_DECODES,
+            )),
+        }
+    }
+}
+
+impl Working {
+    /// One subject's working state in front of `shared`.
+    pub fn new(shared: Shared) -> Working {
         Working {
             sittings: Arc::new(Default::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             calls: Arc::new(Default::default()),
+            corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            shared,
         }
     }
 }
@@ -183,7 +212,7 @@ pub struct Core {
     pub trail_gen: Arc<std::sync::atomic::AtomicU64>,
     /// Shared by every clone and across registry evictions; see `Working`.
     pub sittings: Arc<crate::core::sitting::Sittings>,
-    /// Shared by every clone: the point is one queue of calls in front of one GPU.
+    /// Shared by every clone and every tenant (`Shared`): one queue of calls in front of one GPU.
     pub gate: Arc<crate::infer::gate::InferenceGate>,
     /// One lock per document; reach for it through `corpus_lock`.
     pub corpus_locks: CorpusLocks,
@@ -381,7 +410,7 @@ impl Core {
     }
 
     pub fn from_config(cfg: &Config, vectors: Arc<dyn VectorStore>, store: Store) -> Core {
-        Core::from_config_with(cfg, vectors, store, Working::default())
+        Core::from_config_with(cfg, vectors, store, Working::new(Shared::new(cfg)))
     }
 
     /// The registry's door: a reopened tenant keeps its working memory.
@@ -500,15 +529,11 @@ impl Core {
             model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             trail_gen: Default::default(),
             sittings: working.sittings,
-            gate: Arc::new(crate::infer::gate::InferenceGate::new(
-                std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
-            )),
-            corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            gate: working.shared.gate,
+            corpus_locks: working.corpus_locks,
+            lifecycle_lock: working.lifecycle_lock,
             appliers: builtin_appliers(),
-            decodes: Arc::new(tokio::sync::Semaphore::new(
-                crate::core::image::MAX_CONCURRENT_DECODES,
-            )),
+            decodes: working.shared.decodes,
         }
     }
 
@@ -895,7 +920,7 @@ mod tests {
         let store = crate::store::Store::memory().await.unwrap();
         let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
-        let working = Working::default();
+        let working = Working::new(Shared::new(&cfg));
         let serving = Core::from_config_with(&cfg, vectors.clone(), store.clone(), working.clone());
         let passing = Core::from_config_with(&cfg, vectors, store, working);
         assert_eq!(serving.measured_line(), 0.0);
