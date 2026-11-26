@@ -235,6 +235,9 @@ async fn logout(session: tower_sessions::Session) -> Result<Response> {
 pub const LOGIN_PAGE_PER_MINUTE: u32 = 30;
 pub const LOGIN_PAGE_BURST: u32 = 20;
 pub const SIGN_IN_PER_MINUTE: u32 = 10;
+/// Over every address together: a holder of many addresses gets this, not five guesses each.
+pub const SIGN_IN_ALL_PER_MINUTE: u32 = 60;
+pub const SIGN_IN_ALL_BURST: u32 = 30;
 pub const SIGN_IN_BURST: u32 = 5;
 
 pub fn auth_router() -> Router<AppState> {
@@ -246,10 +249,17 @@ pub fn auth_router() -> Router<AppState> {
                     LOGIN_PAGE_PER_MINUTE,
                     LOGIN_PAGE_BURST,
                 ))
-                .merge(post(login_submit).layer(crate::web::security::rate_limit(
-                    SIGN_IN_PER_MINUTE,
-                    SIGN_IN_BURST,
-                ))),
+                .merge(
+                    post(login_submit)
+                        .layer(crate::web::security::rate_limit(
+                            SIGN_IN_PER_MINUTE,
+                            SIGN_IN_BURST,
+                        ))
+                        .layer(crate::web::security::rate_limit_all(
+                            SIGN_IN_ALL_PER_MINUTE,
+                            SIGN_IN_ALL_BURST,
+                        )),
+                ),
         )
         .route("/auth/callback", get(callback))
         .route("/auth/logout", post(logout))
@@ -639,6 +649,27 @@ mod tests {
         let (own, cookie) = begin(&app).await;
         come_back(&app, &own, &cookie).await;
         assert!(st.auth.pending.take(&own).is_none());
+    }
+
+    #[tokio::test]
+    async fn guesses_spread_over_many_addresses_still_meet_a_ceiling() {
+        use axum::extract::connect_info::MockConnectInfo;
+        // OIDC mode refuses the form before any hashing, so only the limiters are at work.
+        let (_router, st, _idp) = oidc_app().await;
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 4000));
+        let app = crate::web::app(st.clone(), &st.auth.deployment).layer(MockConnectInfo(peer));
+        let mut refused = 0;
+        for n in 0..(super::SIGN_IN_ALL_BURST + 10) {
+            let mut req = form("/auth/login", "username=dev&password=guess");
+            let headers = req.headers_mut();
+            headers.insert("host", "engram.test".parse().unwrap());
+            headers.insert("origin", "https://engram.test".parse().unwrap());
+            headers.insert("x-forwarded-for", format!("198.51.{n}.7").parse().unwrap());
+            if app.clone().oneshot(req).await.unwrap().status() == StatusCode::TOO_MANY_REQUESTS {
+                refused += 1;
+            }
+        }
+        assert_eq!(refused, 10, "each address got its own five guesses, without end");
     }
 
     #[tokio::test]
