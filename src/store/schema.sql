@@ -333,6 +333,9 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- queued it). NULL: containment or one shared document at the review line,
   -- or a link.
   net            TEXT,
+  -- When a pending row's members were last rewritten (a merge, a supersession).
+  -- A decision logged before it was made about other notes and no longer counts.
+  moved_at       INTEGER,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);

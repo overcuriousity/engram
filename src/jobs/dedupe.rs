@@ -176,7 +176,8 @@ async fn asked_already(core: &Core, p: &ArtifactPair, a: &Chunk, b: &Chunk) -> R
         .last_logged("pair_relation", &p.id.to_string(), None, &pair_era(core))
         .await?;
     Ok(last.is_some_and(|d| {
-        d.rev_a == Some(a.embed_rev)
+        d.decided_at > p.moved_at.unwrap_or(0)
+            && d.rev_a == Some(a.embed_rev)
             && d.rev_b == Some(b.embed_rev)
             && !matches!(d.reason.as_deref(), Some("asked_again" | "changed"))
     }))
@@ -473,6 +474,10 @@ impl Applier for PairApplier {
         };
         // Settled since, or asked for writing: the merge unit's, no longer this decision's.
         if p.state != PairState::Pending || p.synthesis_asked {
+            return Ok(false);
+        }
+        // Moved since: the letters of this decision name other notes now.
+        if d.decided_at <= p.moved_at.unwrap_or(0) {
             return Ok(false);
         }
         for (id, rev) in [(&p.a_id, d.rev_a), (&p.b_id, d.rev_b)] {
@@ -2387,6 +2392,39 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(back.len(), 1, "asked again, but not queued to be asked");
+    }
+
+    #[tokio::test]
+    async fn a_waiting_act_on_a_pair_whose_members_moved_is_asked_again() {
+        let mut core = test_core().await;
+        deciding(&mut core, "b_replaces_a", 0.95);
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_day = 0;
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        let d = decision(&core, pair).await;
+        assert!(PairApplier.unchanged(&core, &d).await.unwrap());
+
+        // One member goes into a merge: the row now names the merge, and the letters may swap.
+        let merge = merged_from(&core, "Rust", "engram needs Rust.", &ids[..1]).await;
+        core.store
+            .repoint_open_pairs(&ids[..1], &merge)
+            .await
+            .unwrap();
+        let moved = core.store.get_pair(pair).await.unwrap();
+        assert!(moved.a_id == merge || moved.b_id == merge);
+
+        assert!(
+            !PairApplier.unchanged(&core, &d).await.unwrap(),
+            "a judgement about two notes is applied to a third"
+        );
+        let back = core
+            .store
+            .pairs_to_judge(&pair_era(&core), 10)
+            .await
+            .unwrap();
+        assert_eq!(back.len(), 1, "the moved pair is never judged again");
     }
 
     #[tokio::test]
