@@ -162,6 +162,28 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// What ends the server: a terminal sends SIGINT, systemd stops a unit with SIGTERM.
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "no SIGTERM handler; only ctrl-c stops the server cleanly");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 pub fn app(state: AppState, dep: &security::Deployment) -> Router {
     security::secure(router(state), dep)
 }

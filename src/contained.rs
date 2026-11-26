@@ -213,6 +213,7 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
         decide_handoff: Default::default(),
     };
 
+    crate::jobs::reclaim_orphans(&tenants).await;
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut workers =
         crate::jobs::Worker::spawn(tenants.clone(), cfg.server.workers, shutdown_rx.clone());
@@ -258,7 +259,8 @@ impl Running {
         open
     }
 
-    /// Stop listening, then let a job in flight finish: a `running` row left behind needs repair.
+    /// Stop listening, then let each worker finish the unit it holds; a process killed first
+    /// leaves a `running` row for the next start to take back.
     pub async fn stop(self) {
         let _ = self.shutdown.send(true);
         let _ = self.server.await;

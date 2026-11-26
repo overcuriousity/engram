@@ -41,8 +41,9 @@ use std::time::Duration;
 use tracing::Instrument;
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// A job still marked `running` after this long belonged to a process that died.
+/// A job still marked `running` this long after its last beat belonged to a process that died.
 pub const STUCK_AFTER_SECS: i64 = 600;
+const BEAT: Duration = Duration::from_secs(STUCK_AFTER_SECS as u64 / 3);
 
 /// `supersede` refuses an inactive side, and a status changing since the caller read it is a race,
 /// not a failure of the sweep. Returns whether it happened.
@@ -126,9 +127,35 @@ async fn run_dispatched(core: &Core, job: Job, subject: Option<&str>) -> Result<
 }
 
 async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
+    use futures_util::FutureExt;
     // `did_work` governs only the next periodic run, so only a sweep sets it.
     let mut did_work = false;
-    let result = match (job.stage, job.target_kind.as_str()) {
+    let unit = std::panic::AssertUnwindSafe(dispatch(core, &job, &mut did_work)).catch_unwind();
+    let result = match beating(&core.store.control, job.id, BEAT, unit).await {
+        Ok(result) => result,
+        // A bug of ours, not a verdict on the data: back at the ceiling, and the worker lives.
+        Err(panic) => {
+            let why = format!("the unit panicked: {}", panic_text(panic.as_ref()));
+            tracing::error!(error = %why, "job panicked");
+            core.store
+                .fail_job(job.id, job.attempts.max(MAX_ATTEMPTS), &why)
+                .await?;
+            return Ok(true);
+        }
+    };
+    settle(core, job, did_work, result).await
+}
+
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
+async fn dispatch(core: &Core, job: &Job, did_work: &mut bool) -> Result<()> {
+    match (job.stage, job.target_kind.as_str()) {
         (Stage::Synthesize, _) => synthesize::plan(core, &job.target_id).await,
         // Batched per source; the per-chunk path is for edits, oversize splits and isolating a bad
         // chunk.
@@ -161,10 +188,12 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::Reap
             | Stage::Decisions,
             _,
-        ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
+        ) => run_accounted(core, job.stage).await.map(|w| *did_work = w),
         (Stage::Remind, _) => remind::run(core).await,
-    };
+    }
+}
 
+async fn settle(core: &Core, job: Job, did_work: bool, result: Result<()>) -> Result<bool> {
     match result {
         Ok(()) => {
             core.store.complete_job(job.id).await?;
@@ -437,6 +466,16 @@ async fn settle_failed_artifact(core: &Core, job: &Job, e: &Error) -> Result<()>
     Ok(())
 }
 
+/// For a start, before any worker: the caller is the only process that runs units, so every
+/// `running` row was orphaned by the last stop. Logged, not fatal: the age check still heals.
+pub async fn reclaim_orphans(tenants: &crate::tenants::Tenants) {
+    match tenants.control().reclaim_orphans().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(reclaimed = n, "requeued units the last run left unfinished"),
+        Err(e) => tracing::warn!(error = %e, "could not requeue units left running"),
+    }
+}
+
 pub struct Worker;
 
 impl Worker {
@@ -450,30 +489,55 @@ impl Worker {
         (0..workers.max(1))
             .map(|n| {
                 let tenants = tenants.clone();
-                let mut shutdown = shutdown.clone();
+                let shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     tracing::info!(worker = n, "worker started");
-                    loop {
-                        tokio::select! {
-                            _ = shutdown.changed() => {
-                                if *shutdown.borrow() { break; }
-                            }
-                            worked = run_any(&tenants) => {
-                                match worked {
-                                    Ok(true) => continue,
-                                    Ok(false) => tokio::time::sleep(POLL_INTERVAL).await,
-                                    Err(e) => {
-                                        tracing::error!(error = %e, "worker loop error");
-                                        tokio::time::sleep(POLL_INTERVAL).await;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    work(shutdown, || run_any(&tenants)).await;
                     tracing::info!(worker = n, "worker stopped");
                 })
             })
             .collect()
+    }
+}
+
+/// A unit is never raced against the signal: it finishes, and only the wait between two is cut.
+async fn work<F, Fut>(mut shutdown: tokio::sync::watch::Receiver<bool>, run: F)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<bool>>,
+{
+    while !*shutdown.borrow() {
+        match run().await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => tracing::error!(error = %e, "worker loop error"),
+        }
+        tokio::select! {
+            _ = shutdown.changed() => {}
+            _ = tokio::time::sleep(POLL_INTERVAL) => {}
+        }
+    }
+}
+
+/// Runs `unit` while refreshing its claim every `every`, so the age check only meets dead owners.
+async fn beating<T>(
+    control: &crate::store::control::Control,
+    id: i64,
+    every: Duration,
+    unit: impl Future<Output = T>,
+) -> T {
+    tokio::pin!(unit);
+    let mut tick = tokio::time::interval(every);
+    tick.tick().await;
+    loop {
+        tokio::select! {
+            out = &mut unit => return out,
+            _ = tick.tick() => {
+                if let Err(e) = control.beat(id).await {
+                    tracing::warn!(error = %e, "could not refresh a running unit's claim");
+                }
+            }
+        }
     }
 }
 
@@ -795,6 +859,95 @@ mod tests {
         );
     }
 
+    /// Any handler that panics on what it was given.
+    struct Panicking(FakeEmbedder);
+
+    #[async_trait::async_trait]
+    impl crate::infer::Embedder for Panicking {
+        async fn embed_raw(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+            panic!("the embedder blew up")
+        }
+        fn templates(&self) -> &crate::config::EmbedTemplates {
+            self.0.templates()
+        }
+        fn dim(&self) -> usize {
+            self.0.dim()
+        }
+        fn model(&self) -> &str {
+            self.0.model()
+        }
+        fn max_input_tokens(&self) -> usize {
+            self.0.max_input_tokens()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_unit_that_panics_is_failed_and_the_worker_goes_on() {
+        let mut core = test_core().await;
+        core.embedder = Arc::new(Panicking(FakeEmbedder::new(core.embedder.dim())));
+        core.ingest("alpha", "web", None).await.unwrap();
+
+        while run_one(&core).await.unwrap() {}
+
+        let row = sqlx::query!("SELECT state, last_error FROM jobs WHERE stage = 'embed'")
+            .fetch_one(&core.store.control.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.state, "pending", "left running, as if someone still held it");
+        assert!(row.last_error.unwrap_or_default().contains("panicked"));
+    }
+
+    #[tokio::test]
+    async fn a_unit_in_flight_at_shutdown_is_finished() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (stop, stopping) = tokio::sync::watch::channel(false);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker = tokio::spawn(work(stopping, {
+            let (started, release, finished) = (started.clone(), release.clone(), finished.clone());
+            move || {
+                let (started, release, finished) =
+                    (started.clone(), release.clone(), finished.clone());
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    finished.store(true, Ordering::SeqCst);
+                    Ok(false)
+                }
+            }
+        }));
+        started.notified().await;
+        stop.send(true).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release.notify_one();
+        worker.await.unwrap();
+        assert!(finished.load(Ordering::SeqCst), "the unit was dropped mid-run");
+    }
+
+    #[tokio::test]
+    async fn a_long_unit_keeps_its_claim_fresh_while_it_runs() {
+        let core = test_core().await;
+        core.store.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = core.store.claim_job().await.unwrap().unwrap();
+        let stale = crate::store::now() - 3600;
+        sqlx::query!("UPDATE jobs SET claimed_at = ? WHERE id = ?", stale, j.id)
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
+
+        beating(&core.store.control, j.id, Duration::from_millis(20), async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        })
+        .await;
+
+        let at = sqlx::query_scalar!("SELECT claimed_at FROM jobs WHERE id = ?", j.id)
+            .fetch_one(&core.store.control.pool)
+            .await
+            .unwrap();
+        assert!(at.unwrap_or(0) > stale, "nothing refreshed the claim during the run");
+    }
+
     #[tokio::test]
     async fn a_unit_runs_against_the_core_of_whoever_queued_it() {
         let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
@@ -901,6 +1054,11 @@ mod tests {
             .unwrap()
             .unwrap_or(0);
         if id > 0 {
+            // A worker closes what it claimed, so the row is claimed first.
+            sqlx::query!("UPDATE jobs SET state = 'running' WHERE id = ?", id)
+                .execute(&core.store.control.pool)
+                .await
+                .unwrap();
             core.store.complete_job(id).await.unwrap();
         }
         rearm_periodic_with(core, stage, "collection", did_work).await;

@@ -44,6 +44,8 @@ sha2 = "0.11"
 hex = "0.4"
 anyhow = "1"
 async-trait = "0.1.92"
+# `catch_unwind` over a future: a panicking job must not take its worker with it.
+futures-util = { version = "0.3.33", default-features = false, features = ["std"] }
 # One ask is a sequence of events, written as straight-line async code.
 async-stream = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }

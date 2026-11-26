@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET state = 'pending', run_after = 0, claimed_at = NULL\n              WHERE state = 'running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "2b57d1728d95ce13e83023a2b2bd30737c0c561ef65687a2f8e3860290828735"
+}

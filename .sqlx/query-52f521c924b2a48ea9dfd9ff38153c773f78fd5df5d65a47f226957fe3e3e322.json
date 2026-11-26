@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET claimed_at = ? WHERE id = ? AND state = 'running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "52f521c924b2a48ea9dfd9ff38153c773f78fd5df5d65a47f226957fe3e3e322"
+}

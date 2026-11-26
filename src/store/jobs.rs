@@ -828,9 +828,11 @@ impl Control {
         Ok(q.fetch_one(&self.pool).await?)
     }
 
+    /// Only the claim: an arming that landed mid-run made the row `pending` again, and stays.
     pub async fn complete_job(&self, id: i64) -> Result<()> {
         sqlx::query!(
-            "UPDATE jobs SET state = 'done', last_error = NULL, claimed_at = NULL WHERE id = ?",
+            "UPDATE jobs SET state = 'done', last_error = NULL, claimed_at = NULL
+              WHERE id = ? AND state = 'running'",
             id
         )
         .execute(&self.pool)
@@ -841,7 +843,8 @@ impl Control {
     /// No terminal state: past `MAX_ATTEMPTS` the delay is at its ceiling, so an outage heals.
     pub async fn fail_job(&self, id: i64, attempts: i64, err: &str) -> Result<()> {
         sqlx::query!(
-            "UPDATE jobs SET state = 'pending', run_after = ?, last_error = ?, claimed_at = NULL WHERE id = ?",
+            "UPDATE jobs SET state = 'pending', run_after = ?, last_error = ?, claimed_at = NULL
+              WHERE id = ? AND state = 'running'",
             now() + spread_backoff(attempts),
             err,
             id
@@ -851,7 +854,30 @@ impl Control {
         Ok(())
     }
 
-    /// Rows left 'running' by a crashed process. Called once at startup.
+    /// Every `running` row, for a start under the server lock: nobody else can be running them.
+    pub async fn reclaim_orphans(&self) -> Result<u64> {
+        let res = sqlx::query!(
+            "UPDATE jobs SET state = 'pending', run_after = 0, claimed_at = NULL
+              WHERE state = 'running'"
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// A unit still running says so, or `reclaim_stuck` hands a long one to a second worker.
+    pub async fn beat(&self, id: i64) -> Result<()> {
+        sqlx::query!(
+            "UPDATE jobs SET claimed_at = ? WHERE id = ? AND state = 'running'",
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Rows whose owner stopped beating: a process that died without a restart in between.
     pub async fn reclaim_stuck(&self, older_than_secs: i64) -> Result<u64> {
         let res = sqlx::query!(
             "UPDATE jobs SET state = 'pending', run_after = 0, claimed_at = NULL
@@ -1534,6 +1560,11 @@ mod tests {
         assert_eq!(attempts, 1, "the sweep reset a unit's attempt count");
         assert!(run_after > now(), "the sweep cleared a unit's backoff");
 
+        // The retry comes round and succeeds.
+        sqlx::query!("UPDATE jobs SET state = 'running' WHERE id = ?", j.id)
+            .execute(&s.control.pool)
+            .await
+            .unwrap();
         s.complete_job(j.id).await.unwrap();
         s.rearm_idle_seq(Stage::SegmentWindow, "segment", "src-1#0", 0)
             .await
@@ -1648,7 +1679,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_claim_older_than_the_stuck_threshold_is_nobody_reading() {
-        // `reclaim_stuck` runs once at startup, so a stale `running` row needs the age check.
+        // A claim nobody refreshes belongs to a dead owner, so a stale `running` row needs the age check.
         let s = Store::memory().await.unwrap();
         s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
@@ -1948,5 +1979,67 @@ mod tests {
         assert!(!Stage::GENERATORS.contains(&Stage::Decisions));
         assert_eq!(Stage::Decisions.class(), 1);
         assert!(!Stage::Decisions.reads_a_capture());
+    }
+
+    async fn row_state(s: &Store, id: i64) -> (String, i64, i64) {
+        let r = sqlx::query!("SELECT state, attempts, run_after FROM jobs WHERE id = ?", id)
+            .fetch_one(&s.control.pool)
+            .await
+            .unwrap();
+        (r.state, r.attempts, r.run_after)
+    }
+
+    #[tokio::test]
+    async fn an_arming_that_lands_mid_run_survives_the_run_finishing() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        // An edit while the unit runs: the row goes back to pending for the new text.
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+
+        s.complete_job(j.id).await.unwrap();
+
+        assert_eq!(row_state(&s, j.id).await.0, "pending", "the new arming was closed");
+        assert!(s.claim_job().await.unwrap().is_some(), "and nobody runs it again");
+    }
+
+    #[tokio::test]
+    async fn an_arming_that_lands_mid_run_survives_the_run_failing() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+
+        s.fail_job(j.id, 5, "endpoint down").await.unwrap();
+
+        let (state, attempts, run_after) = row_state(&s, j.id).await;
+        assert_eq!((state.as_str(), attempts, run_after), ("pending", 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_start_takes_back_every_running_row_however_fresh() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(s.control.reclaim_stuck(600).await.unwrap(), 0, "too fresh for the age check");
+
+        assert_eq!(s.control.reclaim_orphans().await.unwrap(), 1);
+        assert_eq!(row_state(&s, j.id).await.0, "pending");
+    }
+
+    #[tokio::test]
+    async fn a_beat_keeps_a_long_unit_from_being_taken_back() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        sqlx::query!("UPDATE jobs SET claimed_at = ? WHERE id = ?", now() - 3600, j.id)
+            .execute(&s.control.pool)
+            .await
+            .unwrap();
+
+        s.control.beat(j.id).await.unwrap();
+
+        assert_eq!(s.control.reclaim_stuck(600).await.unwrap(), 0);
+        assert_eq!(row_state(&s, j.id).await.0, "running");
     }
 }
