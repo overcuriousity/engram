@@ -50,6 +50,7 @@ import androidx.navigation.navArgument
 import io.github.overcuriousity.engram.R
 import io.github.overcuriousity.engram.core.Engram
 import io.github.overcuriousity.engram.core.Mode
+import io.github.overcuriousity.engram.core.PairUri
 import io.github.overcuriousity.engram.core.contained.Core
 import io.github.overcuriousity.engram.core.contained.ModelManifest
 import kotlinx.coroutines.launch
@@ -159,11 +160,23 @@ fun EngramApp(
         return
     }
     // A pairing code reaching a phone that is its own engram means "use that
-    // server". The mode changes first; the next instance is handed the same
-    // code and pairs with it.
+    // server", once the person says so: a link can come from any page. The
+    // mode changes on the press; the next instance pairs with the same code.
     if (engram.loopback && pairText != null) {
-        LaunchedEffect(pairText) { Engram.switch(ctx, Mode.server) }
-        return
+        val uri = PairUri.parse(pairText)
+        if (uri == null) {
+            SideEffect { spent = true }
+        } else {
+            PairOffer(
+                uri, "the engram on this phone",
+                onPair = {
+                    PairConsent.code = pairText
+                    scope.launch { Engram.switch(ctx, Mode.server) }
+                },
+                onCancel = { spent = true },
+            )
+            return
+        }
     }
     if (engram.loopback) {
         var missing by remember { mutableStateOf(engram.requiredMissing()) }
