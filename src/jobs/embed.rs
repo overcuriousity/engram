@@ -660,37 +660,52 @@ async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>
         })
         .collect();
     core.vectors.upsert(points).await?;
-
-    // A transition may have landed during the unlocked write; a row that disagrees now is the race.
-    {
-        let _guard = core.lifecycle_lock.lock().await;
-        let mut fix = Vec::new();
-        for (id, status, superseded_by) in &written {
-            match core.store.get_artifact(id).await {
-                Ok(fresh) if fresh.status != *status || fresh.superseded_by != *superseded_by => {
-                    // Marked whichever way the row moved: the point exists now, so either
-                    // disagreement is drift.
-                    core.store.mark_lifecycle_dirty(id).await?;
-                    marked.push(id.clone());
-                    fix.push(crate::jobs::consolidate::lifecycle_row_of(&fresh));
-                }
-                Ok(_) => {}
-                // An orphan is `heal_store_drift`'s to report.
-                Err(Error::NotFound) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        if !fix.is_empty() {
-            tracing::info!(
-                repaired = fix.len(),
-                "a lifecycle transition landed while these points were being written"
-            );
-            core.vectors.apply_lifecycle(&fix).await?;
-        }
-    }
+    settle_written(core, &written, &mut marked).await?;
 
     // Only after every write returns, or a failed write becomes permanent drift.
     core.store.clear_lifecycle_dirty(&marked).await?;
+    Ok(())
+}
+
+/// A transition may have landed during the unlocked write; a row that disagrees now is the race.
+async fn settle_written(
+    core: &Core,
+    written: &[(String, ArtifactStatus, Option<String>)],
+    marked: &mut Vec<String>,
+) -> Result<()> {
+    let _guard = core.lifecycle_lock.lock().await;
+    let mut fix = Vec::new();
+    let mut orphaned = Vec::new();
+    for (id, status, superseded_by) in written {
+        match core.store.get_artifact(id).await {
+            Ok(fresh) if fresh.status != *status || fresh.superseded_by != *superseded_by => {
+                // Marked whichever way the row moved: the point exists now, so either
+                // disagreement is drift.
+                core.store.mark_lifecycle_dirty(id).await?;
+                marked.push(id.clone());
+                fix.push(crate::jobs::consolidate::lifecycle_row_of(&fresh));
+            }
+            Ok(_) => {}
+            // Deleted during the write: the point just written is this embed's to take back,
+            // or the deleted text stays searchable until someone reads the drift report.
+            Err(Error::NotFound) => orphaned.push(id.clone()),
+            Err(e) => return Err(e),
+        }
+    }
+    if !orphaned.is_empty() {
+        tracing::info!(
+            points = orphaned.len(),
+            "deleted while being embedded; points removed"
+        );
+        core.vectors.delete_artifacts(&orphaned).await?;
+    }
+    if !fix.is_empty() {
+        tracing::info!(
+            repaired = fix.len(),
+            "a lifecycle transition landed while these points were being written"
+        );
+        core.vectors.apply_lifecycle(&fix).await?;
+    }
     Ok(())
 }
 
@@ -804,6 +819,30 @@ mod tests {
                 .unwrap()
                 .contains(&ids[0]),
             "the embed wrote a point for an artifact that no longer exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_deleted_during_the_write_takes_its_point_with_it() {
+        let core = crate::core::test_support::test_core().await;
+        let (_, ids) = corpus_with_pending_chunks(&core, 1).await;
+        let live = core.store.get_artifact(&ids[0]).await.unwrap();
+        embed_batch(&core, std::slice::from_ref(&live))
+            .await
+            .unwrap();
+        let points = || async { core.vectors.all_artifact_ids().await.unwrap() };
+        assert!(points().await.contains(&ids[0]));
+
+        // The delete landed while the write was on its way: the row is gone when it is checked.
+        core.store.delete_artifact(&ids[0]).await.unwrap();
+        let written = [(ids[0].clone(), ArtifactStatus::Active, None)];
+        settle_written(&core, &written, &mut Vec::new())
+            .await
+            .unwrap();
+
+        assert!(
+            !points().await.contains(&ids[0]),
+            "a deleted note's text stays searchable from its point"
         );
     }
 
