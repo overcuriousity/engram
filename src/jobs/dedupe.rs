@@ -183,6 +183,35 @@ async fn asked_already(core: &Core, p: &ArtifactPair, a: &Chunk, b: &Chunk) -> R
     }))
 }
 
+/// A moved pair carries the cosine of the members it had before, and that number decides
+/// whether the base may act alone and is what the review line is tuned on. Measured again
+/// from the vectors; where one is missing, the pair waits for a person. A link's pair has no
+/// cosine (`score` zero) and keeps none.
+async fn remeasured(
+    core: &Core,
+    mut p: ArtifactPair,
+    a: &Chunk,
+    b: &Chunk,
+) -> Result<ArtifactPair> {
+    if p.moved_at.is_none() || p.score <= 0.0 {
+        return Ok(p);
+    }
+    let vectors = (
+        core.vectors.dense_of(&a.id).await?,
+        core.vectors.dense_of(&b.id).await?,
+    );
+    match vectors {
+        (Some(va), Some(vb)) => {
+            p.score = crate::vector::cosine(&va, &vb);
+            core.store.set_pair_score(p.id, p.score).await?;
+        }
+        _ => {
+            p.net.get_or_insert(crate::store::pairs::Net::Wide);
+        }
+    }
+    Ok(p)
+}
+
 /// Whether this pair may act without a person.
 pub(crate) fn restricted(pair: &ArtifactPair, live_review_min: f32) -> bool {
     pair.net.is_some() || (pair.score > 0.0 && pair.score < live_review_min)
@@ -224,6 +253,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     if asked_already(core, &p, a, b).await? {
         return Ok(());
     }
+    let p = remeasured(core, p, a, b).await?;
 
     // Context, oldest first: only a merge shows what it was made of.
     let sources = |c: &Chunk| -> Vec<&Chunk> {
@@ -2425,6 +2455,37 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(back.len(), 1, "the moved pair is never judged again");
+    }
+
+    #[tokio::test]
+    async fn a_moved_pair_is_judged_on_the_cosine_of_the_members_it_has_now() {
+        let mut core = test_core().await;
+        deciding(&mut core, "no_conflict", 0.95);
+        let ids = disagreeing(&core).await;
+        // Filed at the cosine of two other notes, before one of them was replaced.
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.42)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        sqlx::query!("UPDATE artifact_pairs SET moved_at = 1 WHERE id = ?", pair)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let now = core.store.get_pair(pair).await.unwrap().score;
+        assert!(
+            (now - 0.93).abs() < 0.01,
+            "{now}: the old pair's cosine still decides whether the base may act alone"
+        );
     }
 
     #[tokio::test]

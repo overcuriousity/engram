@@ -665,7 +665,8 @@ impl Store {
     }
 
     /// Self-pairs and collisions are dismissed rather than moved; only `Pending` remains by
-    /// now. Counters reset and `moved_at` stamped: what was decided was about other members.
+    /// now. Counters reset and `moved_at` stamped: what was decided was about other members,
+    /// and `score` is theirs too until `dedupe::remeasured` reads it again.
     pub async fn repoint_open_pairs(&self, old: &[String], new_id: &str) -> Result<u64> {
         let mut moved = 0u64;
         for o in old {
@@ -729,6 +730,18 @@ impl Store {
             }
         }
         Ok(moved)
+    }
+
+    /// For a pair whose members moved: the cosine of the two it names now.
+    pub async fn set_pair_score(&self, id: i64, score: f32) -> Result<()> {
+        sqlx::query!(
+            "UPDATE artifact_pairs SET score = ? WHERE id = ?",
+            score,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// For the one caller that acts on the row itself.
