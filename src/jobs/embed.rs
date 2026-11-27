@@ -707,10 +707,11 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
     if core.store.pending_embed_count(corpus_id).await? > 0 {
         return Ok(());
     }
-    let status = if core.store.failed_embed_count(corpus_id).await? > 0 {
-        CorpusStatus::Partial
-    } else if was == CorpusStatus::Partial {
-        // A window the model refused leaves a hole that clean chunks do not fill.
+    // From what is failed now, not from `was`: a chunk that embeds after an outage makes the
+    // source whole, while a window the model refused stays a hole.
+    let holed = core.store.failed_embed_count(corpus_id).await? > 0
+        || core.store.has_failed_segment(corpus_id).await?;
+    let status = if holed {
         CorpusStatus::Partial
     } else {
         CorpusStatus::Ready
@@ -1630,6 +1631,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chunk_that_embeds_after_an_outage_makes_the_source_whole_again() {
+        let core = test_core().await;
+        let (src_id, ids) = seed(&core, &["one", "two"]).await;
+        run(&core, &ids[0]).await.unwrap();
+        // The endpoint was down for every attempt; the unit stays armed at the ceiling.
+        core.store.mark_embed_failed(&ids[1]).await.unwrap();
+        settle_corpus(&core, &src_id).await.unwrap();
+        let status = || async { core.store.get_corpus(&src_id).await.unwrap().status };
+        assert_eq!(status().await, CorpusStatus::Partial);
+
+        run(&core, &ids[1]).await.unwrap();
+
+        assert_eq!(
+            status().await,
+            CorpusStatus::Ready,
+            "every chunk is embedded and the source still reads as broken"
+        );
+    }
+
+    #[tokio::test]
     async fn a_whole_source_is_embedded_in_one_inference_call() {
         let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
         let (src_id, ids) = seed(&core, &["one", "two", "three", "four", "five"]).await;
@@ -1717,6 +1738,18 @@ mod tests {
     async fn a_partially_segmented_source_is_not_promoted_to_ready() {
         let core = test_core().await;
         let (src_id, _) = seed(&core, &["one", "two"]).await;
+        // One window the model refused: the hole clean chunks do not fill.
+        let window = crate::store::segments::NewSegment {
+            start_line: 1,
+            end_line: 2,
+            text: "raw",
+        };
+        core.store.upsert_segments(&src_id, &[window]).await.unwrap();
+        let failed = crate::store::segments::SegmentState::Failed;
+        core.store
+            .set_segment_state(&src_id, 0, failed, Some("refused"))
+            .await
+            .unwrap();
         core.store
             .set_corpus_status(&src_id, CorpusStatus::Partial)
             .await
