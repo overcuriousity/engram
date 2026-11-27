@@ -102,7 +102,9 @@ impl Store {
         per_note: usize,
         max: usize,
     ) -> Result<Minted> {
-        let mut tx = self.pool.begin().await?;
+        // Reads before it writes: deferred, a writer in between fails the upgrade at once,
+        // whatever the busy timeout.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let held = sqlx::query!(
             r#"SELECT id AS "id!", query AS "query!", query_vec AS "query_vec!", embed_model AS "embed_model!"
                  FROM trails WHERE artifact_id = ? AND retired_at IS NULL"#,
@@ -482,6 +484,40 @@ mod tests {
 
     fn v(x: f32, y: f32) -> Vec<f32> {
         vec![x, y, 0.0]
+    }
+
+    #[tokio::test]
+    async fn trails_minted_at_the_same_moment_all_land() {
+        // A file and its four connections: one in-memory connection cannot meet a stale snapshot.
+        let dir = tempfile::tempdir().unwrap();
+        let control = crate::store::control::Control::memory().await.unwrap();
+        control
+            .provision(crate::store::TEST_SUBJECT, None)
+            .await
+            .unwrap();
+        let path = dir.path().join("t.db");
+        let store = Store::connect(&path.to_string_lossy(), control, crate::store::TEST_SUBJECT)
+            .await
+            .unwrap();
+        let mut notes = Vec::new();
+        for _ in 0..24 {
+            notes.push(note(&store).await);
+        }
+        let mut tasks = Vec::new();
+        for (n, id) in notes.into_iter().enumerate() {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                let (q, vec, source) = (format!("words {n}"), v(1.0, 0.0), format!("d{n}"));
+                store
+                    .mint_trail(&new(&id, &q, &vec, Verdict, &source), 4, 100)
+                    .await
+            }));
+        }
+        for t in tasks {
+            t.await
+                .unwrap()
+                .expect("a verdict's trail was lost to a busy database");
+        }
     }
 
     fn new<'a>(

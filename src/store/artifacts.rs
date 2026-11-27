@@ -1719,7 +1719,8 @@ impl Store {
     /// One transaction; the grave row goes only where the artifact was restored.
     /// `lifecycle_dirty` is cleared: there is no point to write a payload onto until the embed.
     pub async fn exhume(&self, id: &str) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        // Immediate: it reads the grave before it writes (see `mint_trail`).
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let Some(row) = sqlx::query!("SELECT text FROM graveyard WHERE id = ?", id)
             .fetch_optional(&mut *tx)
             .await?
