@@ -9,6 +9,14 @@ pub const DEFAULT_LIMIT: usize = 10;
 pub const MAX_LIMIT: usize = 50;
 /// Reranking and grouping only narrow what they are given.
 pub const CANDIDATE_MULTIPLIER: usize = 3;
+struct StopWithTheStream(tokio::task::AbortHandle);
+
+impl Drop for StopWithTheStream {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// A forty-chunk document would otherwise fill the whole answer.
 pub const MAX_PER_CORPUS: usize = 3;
 
@@ -1146,6 +1154,9 @@ impl Core {
             let task = tokio::spawn(async move {
                 core.search_inner(&query, params, origin, true, Some(tx)).await
             });
+            // A reader that went away takes the search with it: left running it embeds and
+            // reranks for nobody, and holds the interactive lease while it does.
+            let _stop = StopWithTheStream(task.abort_handle());
             // The sender drops when the search returns, so this ends after every reported stage.
             while let Some(ev) = rx.recv().await {
                 yield ev;
@@ -2230,6 +2241,62 @@ mod tests {
             include_deprecated: false,
             include_superseded: false,
         }
+    }
+
+    /// An embedder that never answers, and says when the call into it was given up.
+    struct Stalled {
+        inner: crate::infer::fake::FakeEmbedder,
+        given_up: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct SaysSo(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for SaysSo {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::infer::Embedder for Stalled {
+        async fn embed_raw(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+            let _held = SaysSo(self.given_up.clone());
+            std::future::pending().await
+        }
+        fn templates(&self) -> &crate::config::EmbedTemplates {
+            self.inner.templates()
+        }
+        fn dim(&self) -> usize {
+            self.inner.dim()
+        }
+        fn model(&self) -> &str {
+            self.inner.model()
+        }
+        fn max_input_tokens(&self) -> usize {
+            self.inner.max_input_tokens()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_streamed_search_nobody_reads_any_more_stops() {
+        use tokio_stream::StreamExt;
+        let mut core = test_core().await;
+        let given_up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        core.embedder = std::sync::Arc::new(Stalled {
+            inner: crate::infer::fake::FakeEmbedder::new(core.embedder.dim()),
+            given_up: given_up.clone(),
+        });
+        {
+            let s = core.search_events(q("mount"), None, Door::Cli.into());
+            tokio::pin!(s);
+            // Under way, waiting on the embedder; then the client goes.
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), s.next()).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            given_up.load(std::sync::atomic::Ordering::SeqCst),
+            "the search runs on for nobody, holding the interactive lease"
+        );
     }
 
     #[tokio::test]
