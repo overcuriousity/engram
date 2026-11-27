@@ -42,6 +42,40 @@ pub async fn vacuum_into(src: &Path, dst: &Path) -> Result<()> {
     copied.map(|_| ())
 }
 
+/// What SQLite itself finds wrong inside `db`; empty means sound. A checksum only says the
+/// bytes are the ones written, not that they were a database worth keeping.
+pub async fn unsound(db: &Path) -> Result<Vec<String>> {
+    use sqlx::Row;
+    let mut conn = open_read_only(db).await?;
+    let fail = |e: sqlx::Error| Error::Store(format!("{}: {e}", db.display()));
+    let mut found = Vec::new();
+    // runtime: a pragma, which the query macros do not check.
+    for row in sqlx::query("PRAGMA integrity_check")
+        .fetch_all(&mut conn)
+        .await
+        .map_err(fail)?
+    {
+        let line: String = row.try_get(0).map_err(fail)?;
+        if line != "ok" {
+            found.push(line);
+        }
+    }
+    // runtime: a pragma, as above.
+    for row in sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut conn)
+        .await
+        .map_err(fail)?
+    {
+        let (table, parent): (String, String) =
+            (row.try_get(0).map_err(fail)?, row.try_get(2).map_err(fail)?);
+        found.push(format!(
+            "a row in {table} points at a missing row in {parent}"
+        ));
+    }
+    let _ = conn.close().await;
+    Ok(found)
+}
+
 /// The same queries the store-drift heal reads, counted.
 pub async fn counts(db: &Path) -> Result<(u64, u64)> {
     let mut conn = open_read_only(db).await?;
@@ -140,6 +174,36 @@ pub(crate) mod tests {
     use crate::store::artifacts::NewArtifact;
     use crate::store::control::Control;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Leaves artifacts pointing at a corpus that is gone, as only a connection with foreign
+    /// keys off can.
+    pub(crate) async fn orphan(path: &Path) {
+        let mut raw = SqliteConnectOptions::new()
+            .filename(path)
+            .foreign_keys(false)
+            .connect()
+            .await
+            .unwrap();
+        // runtime: planted behind the store's back.
+        sqlx::query("DELETE FROM corpora")
+            .execute(&mut raw)
+            .await
+            .unwrap();
+        raw.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_row_pointing_at_nothing_is_named_and_a_sound_base_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let _store = tenant_with_three(&path).await;
+        assert_eq!(unsound(&path).await.unwrap(), Vec::<String>::new());
+
+        orphan(&path).await;
+
+        let found = unsound(&path).await.unwrap();
+        assert!(found.iter().any(|p| p.contains("artifacts")), "{found:?}");
+    }
 
     pub(crate) async fn tenant_with_three(path: &Path) -> Store {
         let s = Store::connect(

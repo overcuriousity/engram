@@ -89,6 +89,27 @@ impl Store {
         Ok(store)
     }
 
+    /// As `Control::open_read_only`: a tenant's base opened to be looked at, never migrated.
+    pub async fn open_read_only(
+        path: &str,
+        control: control::Control,
+        subject: &str,
+    ) -> Result<Store> {
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?
+            .read_only(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts)
+            .await?;
+        Ok(Store {
+            pool,
+            control,
+            subject: subject.to_string(),
+        })
+    }
+
     pub fn for_subject(&self, subject: &str) -> Store {
         Store {
             subject: subject.to_string(),

@@ -396,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(dir) = &args.backup_check {
-        match engram::backup::take::check(dir) {
+        match engram::backup::take::check_sound(dir).await {
             Ok(m) => {
                 println!(
                     "{} intact: control database and {} tenants{}",

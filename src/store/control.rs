@@ -70,6 +70,20 @@ impl Control {
         Ok(control)
     }
 
+    /// For a command that only looks: no migration, no `ensure_instance`, and SQLite itself
+    /// refuses a write. A base older than this build then fails its queries by name.
+    pub async fn open_read_only(path: &str) -> Result<Control> {
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?
+            .read_only(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts)
+            .await?;
+        Ok(Control { pool })
+    }
+
     /// One connection: every `sqlite::memory:` connection is a separate database.
     pub async fn memory() -> Result<Control> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
