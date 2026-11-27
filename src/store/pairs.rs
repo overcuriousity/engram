@@ -23,7 +23,7 @@ pub const AWAITING_REVIEW: [PairState; 6] = [
     PairState::Contradiction,
     PairState::Superseded,
     PairState::Duplicate,
-    // The drain puts these back to `Pending`; listed until it has run.
+    // The drain puts `Vacuous` back to `Pending` and closes `Unmergeable`; listed until it has run.
     PairState::Vacuous,
     PairState::Unmergeable,
     PairState::Pending,

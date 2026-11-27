@@ -86,6 +86,7 @@ impl Core {
         let core = self.clone();
         let req = req.clone();
         let origin = origin.into();
+        self.mark_used();
 
         async_stream::try_stream! {
             if req.q.trim().is_empty() {

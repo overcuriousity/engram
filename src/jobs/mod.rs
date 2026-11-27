@@ -217,6 +217,8 @@ async fn settle(core: &Core, job: Job, did_work: bool, result: Result<()>) -> Re
         Err(Error::NotFound) => {
             tracing::info!("target no longer exists; dropping job");
             core.store.complete_job(job.id).await?;
+            // A sweep that met something deleted is still a sweep: it comes round again.
+            rearm_periodic(core, &job, false).await;
             Ok(true)
         }
         Err(e) if e.retryable() => {
@@ -895,6 +897,23 @@ mod tests {
             .unwrap();
         assert_eq!(row.state, "pending", "left running, as if someone still held it");
         assert!(row.last_error.unwrap_or_default().contains("panicked"));
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_met_something_deleted_still_comes_round_again() {
+        let core = sweeping_core().await;
+        core.store
+            .arm_periodic(Stage::Retention, "collection", "collection", 0)
+            .await
+            .unwrap();
+        let job = core.store.claim_job().await.unwrap().unwrap();
+
+        settle(&core, job, false, Err(Error::NotFound)).await.unwrap();
+
+        assert!(
+            pending_run_after(&core, Stage::Retention).await.is_some(),
+            "the sweep is closed until the hourly repair finds it missing"
+        );
     }
 
     #[tokio::test]

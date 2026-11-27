@@ -54,6 +54,8 @@ pub struct Working {
     pub line: Arc<std::sync::atomic::AtomicU32>,
     /// Held here so a transient `Core` spends the same tick as the serving one.
     pub calls: Arc<crate::core::judging::Meter>,
+    /// When someone last searched or asked; see `Core::mark_used`.
+    pub used: Arc<std::sync::atomic::AtomicI64>,
     /// Held here so a repair pass on a transient `Core` excludes the request it races.
     pub corpus_locks: CorpusLocks,
     pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
@@ -89,6 +91,7 @@ impl Working {
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             calls: Arc::new(Default::default()),
+            used: Arc::new(Default::default()),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
             shared,
@@ -212,6 +215,8 @@ pub struct Core {
     pub trail_gen: Arc<std::sync::atomic::AtomicU64>,
     /// Shared by every clone and across registry evictions; see `Working`.
     pub sittings: Arc<crate::core::sitting::Sittings>,
+    /// See `mark_used`.
+    pub used: Arc<std::sync::atomic::AtomicI64>,
     /// Shared by every clone and every tenant (`Shared`): one queue of calls in front of one GPU.
     pub gate: Arc<crate::infer::gate::InferenceGate>,
     /// One lock per document; reach for it through `corpus_lock`.
@@ -532,12 +537,24 @@ impl Core {
             model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             trail_gen: Default::default(),
             sittings: working.sittings,
+            used: working.used,
             gate: working.shared.gate,
             corpus_locks: working.corpus_locks,
             lifecycle_lock: working.lifecycle_lock,
             appliers: builtin_appliers(),
             decodes: working.shared.decodes,
         }
+    }
+
+    /// Someone searched or asked just now. Kept in memory because with `[learn]` off nothing
+    /// is recorded, and the idle passes would take a base in use for a sleeping one.
+    pub fn mark_used(&self) {
+        self.used
+            .store(crate::store::now(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn used_since(&self, since: i64) -> bool {
+        self.used.load(std::sync::atomic::Ordering::Relaxed) > since
     }
 
     /// Exclusive access to one document's artifact rows; segment writes and `finish` renumbering
@@ -830,6 +847,7 @@ pub mod test_support {
             model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             trail_gen: Default::default(),
             sittings: Arc::new(Default::default()),
+            used: Arc::new(Default::default()),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::ZERO,
             )),

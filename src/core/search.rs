@@ -1161,6 +1161,10 @@ impl Core {
         stages: Option<tokio::sync::mpsc::UnboundedSender<SearchEvent>>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let door = origin.door;
+        // The base's own judging searches too, and must not keep it awake.
+        if door != Door::Judge {
+            self.mark_used();
+        }
         let cap = params.per_source_cap;
         let recency_weight = params.recency_weight;
         // A client that hung up must not fail a running search.
@@ -2220,6 +2224,18 @@ mod tests {
             include_deprecated: false,
             include_superseded: false,
         }
+    }
+
+    #[tokio::test]
+    async fn a_persons_search_marks_the_base_as_in_use_and_a_judges_does_not() {
+        let mut core = test_core().await;
+        // Nothing is recorded with learning off, so the queue has only this to go by.
+        core.learn.enabled = false;
+        let before = crate::store::now() - 1;
+        core.search(&q("mount"), Door::Judge).await.unwrap();
+        assert!(!core.used_since(before), "the base's own judging keeps it awake");
+        core.search(&q("mount"), Door::Ui).await.unwrap();
+        assert!(core.used_since(before), "a search left no trace of someone being there");
     }
 
     #[tokio::test]
