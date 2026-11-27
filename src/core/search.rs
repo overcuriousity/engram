@@ -949,7 +949,13 @@ impl Core {
         let terms = keyword_terms(q);
         let found = match self
             .store
-            .keyword_matches(&terms, unembedded_only, limit * 2)
+            .keyword_matches(
+                &terms,
+                unembedded_only,
+                limit * 2,
+                category.as_deref(),
+                tags,
+            )
             .await
         {
             Ok(f) => f,

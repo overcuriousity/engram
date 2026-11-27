@@ -862,6 +862,8 @@ impl Store {
         terms: &[String],
         unembedded_only: bool,
         limit: usize,
+        category: Option<&str>,
+        tags: &[String],
     ) -> Result<Vec<Chunk>> {
         if terms.is_empty() || limit == 0 {
             return Ok(Vec::new());
@@ -878,9 +880,16 @@ impl Store {
                 " AND (text LIKE ? ESCAPE '\\' OR COALESCE(title, '') LIKE ? ESCAPE '\\')",
             );
         }
+        // In the statement, not after it: a limit taken first is spent on rows outside the filter.
+        if category.is_some() {
+            sql.push_str(" AND category = ?");
+        }
+        for _ in tags {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM json_each(artifacts.tags) WHERE value = ?)");
+        }
         sql.push_str(" ORDER BY created_at DESC, id LIMIT ?");
-        // Only a fixed clause repeated per term is interpolated; every value is bound.
-        // runtime: one LIKE clause per search term.
+        // Only fixed clauses repeated per term and per tag are interpolated; every value is bound.
+        // runtime: one LIKE clause per search term, one EXISTS per tag.
         let mut q = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(sql));
         for t in terms {
             let escaped = t
@@ -889,6 +898,12 @@ impl Store {
                 .replace('_', "\\_");
             let pattern = format!("%{escaped}%");
             q = q.bind(pattern.clone()).bind(pattern);
+        }
+        if let Some(c) = category {
+            q = q.bind(c);
+        }
+        for t in tags {
+            q = q.bind(t);
         }
         let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(row_to_artifact).collect())
@@ -1859,6 +1874,57 @@ mod tests {
             tags: vec!["forensics".into(), "windows".into()],
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_keyword_match_inside_the_filter_is_not_crowded_out_by_ones_outside_it() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let wanted = s
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    tags: vec!["keep".into()],
+                    category: Some("reference".into()),
+                    ..nc(0, "mount the image read-only")
+                }],
+            )
+            .await
+            .unwrap();
+        // Newer, matching, and outside the filter: more of them than the limit.
+        let later: Vec<NewArtifact> = (1..6).map(|i| nc(i, "mount something else")).collect();
+        s.insert_artifacts(&src.id, &later).await.unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = created_at - 100 WHERE id = ?",
+            wanted[0].id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        let terms = ["mount".to_string()];
+        let by_tag = s
+            .keyword_matches(&terms, false, 2, None, &["keep".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            by_tag.len(),
+            1,
+            "the limit was spent before the filter was asked"
+        );
+        assert_eq!(by_tag[0].id, wanted[0].id);
+        let by_category = s
+            .keyword_matches(&terms, false, 2, Some("reference"), &[])
+            .await
+            .unwrap();
+        assert_eq!(by_category.len(), 1);
+        assert_eq!(
+            s.keyword_matches(&terms, false, 2, None, &[])
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
