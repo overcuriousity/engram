@@ -47,7 +47,9 @@ pub struct Store {
     pub subject: String,
 }
 
-/// Retires journal entries back to ordinary captures. Idempotent, so it runs on every connect;
+const JOURNAL_RETIRED: &str = "journal.retired";
+
+/// Retires journal entries back to ordinary captures, once per base (`JOURNAL_RETIRED`);
 /// `json_valid` guards rows whose metadata is not JSON.
 const RETIRE_JOURNAL: &str = "
 UPDATE corpora
@@ -360,10 +362,14 @@ impl Store {
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
 
-        sqlx::raw_sql(RETIRE_JOURNAL)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        // Once per base: four scans of `corpora` are not something every open should pay.
+        if self.meta_get(JOURNAL_RETIRED).await?.is_none() {
+            sqlx::raw_sql(RETIRE_JOURNAL)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+            self.meta_set(JOURNAL_RETIRED, "1").await?;
+        }
 
         Ok(())
     }
@@ -991,8 +997,18 @@ mod tests {
         .await
         .unwrap();
 
+        // A base from before: this build has not been over it yet.
+        sqlx::query!("DELETE FROM meta WHERE key = 'journal.retired'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         store.migrate().await.unwrap();
+        assert_eq!(
+            store.meta_get("journal.retired").await.unwrap().as_deref(),
+            Some("1"),
+            "every open scans the captures four times over"
+        );
 
         let c = store.get_corpus(&filed.id).await.unwrap();
         assert_eq!(c.origin, "cli");
