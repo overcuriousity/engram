@@ -789,6 +789,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reminder_follows_its_note_out_of_a_replacement_and_back() {
+        let core = test_core().await;
+        let id = due_at(&core, crate::store::now() + 3_600).await;
+        let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        let out = core
+            .ingest_capture(Capture::new("Something else entirely", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let other = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let on = || async { core.store.moment(&id).await.unwrap().unwrap().artifact_id };
+
+        core.supersede(&aid, &other).await.unwrap();
+        assert_eq!(on().await, other, "carried to the note that replaced it");
+
+        core.unsupersede(&aid).await.unwrap();
+        assert_eq!(
+            on().await,
+            aid,
+            "the replacement was undone and the reminder stayed behind"
+        );
+    }
+
+    #[tokio::test]
     async fn one_channel_refusing_does_not_push_the_other_one_twice() {
         let good = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))

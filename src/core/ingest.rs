@@ -951,14 +951,21 @@ impl Core {
                 .await?;
         }
         // Recorded on the lineage, or the unfinished-merge repair re-hides it every tick.
-        if let Some(w) = winner
-            && let Ok(wc) = self.store.get_artifact(&w).await
+        if let Some(w) = &winner
+            && let Ok(wc) = self.store.get_artifact(w).await
             && wc.provenance == crate::store::artifacts::Provenance::Merged
         {
             self.store.mark_source_restored(artifact_id).await?;
         }
         self.reopen_the_pairs_that_were_waiting_on(artifact_id)
             .await;
+        // Its reminders went to the winner when it was hidden; back on a note nobody sees they
+        // would never fire. Best-effort, as the carry was.
+        if let Some(w) = &winner
+            && let Err(e) = self.store.return_moments(w, artifact_id).await
+        {
+            tracing::warn!(artifact_id, winner = %w, error = %e, "could not return its reminders");
+        }
         // `uncovered` only sees active artifacts, so a restored artifact must re-arm its reminder.
         // Best-effort: the restore has committed, and the background sweep re-arms on its own tick.
         if let Err(e) = self.store.rearm_remind().await {
