@@ -189,6 +189,10 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
             );
             continue;
         }
+        if asked_by_a_person(&a) {
+            tracing::info!(subject = %a.subject_id, "a person hid it; a search given up on does not bring it back");
+            continue;
+        }
         let restore = match a.kind {
             Kind::Discard | Kind::Reap => core.reactivate(&a.subject_id).await,
             Kind::Supersede => core.unsupersede(&a.subject_id).await,
@@ -241,6 +245,12 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
 }
 
 /// Also undoes the merge behind a `Merge` row. `false` for a kind this rule does not take back.
+/// A row a person asked for carries `asked_by` in its evidence (`dedupe`, `merge_unit`, `reap`).
+fn asked_by_a_person(a: &crate::store::actions::Action) -> bool {
+    serde_json::from_str::<serde_json::Value>(&a.evidence_json)
+        .is_ok_and(|e| e.get("asked_by").is_some_and(|by| !by.is_null()))
+}
+
 async fn stamp_restored(
     core: &Core,
     a: &crate::store::actions::Action,
@@ -372,6 +382,10 @@ pub(crate) async fn rule_one(
             at: a.at,
             id: a.id.clone(),
         };
+        // What a person decided is theirs to take back; a measurement does not overrule it.
+        if asked_by_a_person(&a) {
+            continue;
+        }
         // A merge's rows are stamped together by the first original that fails.
         if core
             .store
@@ -726,6 +740,58 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    fn by_a_person(mut row: NewAction) -> NewAction {
+        row.evidence = serde_json::json!({ "asked_by": "operator" });
+        row
+    }
+
+    #[tokio::test]
+    async fn what_a_person_decided_is_not_taken_back_on_evidence() {
+        // The same worse ranking that undoes the base's own supersession.
+        let (core, order) = seeded().await;
+        let g = generation_for(&core).await;
+        observed(&core, &g.id, &order[3], 1).await;
+        observed(&core, &g.id, &order[3], 1).await;
+        let (loser, winner) = (order[3].clone(), order[2].clone());
+        core.supersede_with(
+            &loser,
+            &winner,
+            Some(by_a_person(supersede_row(&loser, &winner))),
+        )
+        .await
+        .unwrap();
+
+        let out = rule_one(&core, &g, crate::store::now()).await.unwrap();
+
+        assert_eq!(
+            out.1, 0,
+            "a person's replacement was undone by a measurement"
+        );
+        assert!(
+            core.store
+                .get_artifact(&loser)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn what_a_person_discarded_is_not_restored_by_a_search_given_up_on() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        core.deprecate_with(&answer, Some(by_a_person(discard_row(&answer))))
+            .await
+            .unwrap();
+        gave_up(&core, &g.id).await;
+
+        let out = rule_two(&core, crate::store::now()).await.unwrap();
+
+        assert_eq!(out.0, 0);
+        assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
     }
 
     #[tokio::test]
