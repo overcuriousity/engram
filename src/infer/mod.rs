@@ -169,6 +169,58 @@ pub enum Delta {
     Reasoning(String),
 }
 
+/// How long a delta waits to be taken. Past it the reader has stalled, and nothing more is
+/// offered: the call finishes and frees its lane, and the completion still holds every word.
+pub const SINK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A reader of deltas, which are a courtesy: the completion is what counts.
+pub struct Sink {
+    tx: tokio::sync::mpsc::Sender<Delta>,
+    stalled: bool,
+}
+
+impl Sink {
+    pub fn new(tx: tokio::sync::mpsc::Sender<Delta>) -> Sink {
+        Sink { tx, stalled: false }
+    }
+
+    /// A reader that left is ignored as before; one that stopped reading is given up on once.
+    pub async fn offer(&mut self, delta: Delta) {
+        if self.stalled {
+            return;
+        }
+        if tokio::time::timeout(SINK_PATIENCE, self.tx.send(delta))
+            .await
+            .is_err()
+        {
+            tracing::info!("the reader stopped taking the answer; finishing without it");
+            self.stalled = true;
+        }
+    }
+
+    /// For a thread that may block: the same patience, without a runtime.
+    pub fn offer_blocking(&mut self, delta: Delta) {
+        if self.stalled {
+            return;
+        }
+        let until = std::time::Instant::now() + SINK_PATIENCE;
+        let mut delta = delta;
+        loop {
+            match self.tx.try_send(delta) {
+                Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(back)) => {
+                    if std::time::Instant::now() >= until {
+                        self.stalled = true;
+                        return;
+                    }
+                    delta = back;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+}
+
 pub struct Completion {
     pub text: String,
     /// The ceiling ended the reply; what that costs is the caller's to decide.

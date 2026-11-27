@@ -514,7 +514,8 @@ fn generate(
     // Some templates open the thinking themselves; the model then writes only the closing tag.
     let mut split = ThinkSplit::new(prompt.trim_end().ends_with(THINK_OPEN));
     let mut text = String::new();
-    let emit = |parts: Vec<(bool, String)>, text: &mut String| {
+    let mut sink = job.sink.clone().map(crate::infer::Sink::new);
+    let mut emit = |parts: Vec<(bool, String)>, text: &mut String| {
         for (thinking, mut part) in parts {
             if !thinking && text.is_empty() {
                 part = part.trim_start().to_string();
@@ -525,9 +526,9 @@ fn generate(
             if !thinking {
                 text.push_str(&part);
             }
-            if let Some(sink) = &job.sink {
-                // A reader that went away does not stop the answer; see `Completer::answer_streaming`.
-                let _ = sink.blocking_send(if thinking {
+            if let Some(sink) = &mut sink {
+                // A reader gone or stalled does not stop the answer; see `infer::Sink`.
+                sink.offer_blocking(if thinking {
                     Delta::Reasoning(part)
                 } else {
                     Delta::Token(part)
