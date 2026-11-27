@@ -274,6 +274,21 @@ impl Core {
         Ok(!self.budget(job).await?.spent())
     }
 
+    /// Whether the text is still the one the condensation wrote. A row from before `rev` was
+    /// recorded cannot say, and counts as untouched.
+    pub async fn condensation_stands(
+        &self,
+        a: &crate::store::actions::Action,
+    ) -> crate::error::Result<bool> {
+        let wrote = serde_json::from_str::<serde_json::Value>(&a.evidence_json)
+            .ok()
+            .and_then(|v| v.get("rev").and_then(|n| n.as_i64()));
+        let Some(wrote) = wrote else {
+            return Ok(true);
+        };
+        Ok(self.store.get_artifact(&a.subject_id).await?.embed_rev == wrote)
+    }
+
     /// Put back the version a condensation retired; called by the button and by the base.
     pub async fn uncondense(
         &self,

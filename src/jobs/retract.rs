@@ -422,6 +422,13 @@ pub(crate) async fn rule_one(
             if !sweep::recommend(&after, &before) {
                 continue;
             }
+            // Edited since: the edit is what moved the probes, and the old text over it would
+            // undo a person's work, not the base's.
+            match core.condensation_stands(&a).await {
+                Ok(true) => {}
+                Ok(false) | Err(crate::error::Error::NotFound) => continue,
+                Err(e) => return Err(e),
+            }
             core.uncondense(&a.id, UndoneBy::Evidence).await?;
             undone += 1;
             tracing::info!(
@@ -582,6 +589,40 @@ mod tests {
                 .action_was_undone(&id, Kind::Condense)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_condensation_a_person_has_edited_since_is_not_taken_back() {
+        let (mut core, order) = seeded().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let g = generation_for(&core).await;
+        let id = order[0].clone();
+        let probes = probes_on(&core, &id, &g, 3).await;
+        let (action, _) = core
+            .store
+            .condense_artifact(&id, None, "shorter", None, &[], serde_json::json!({}))
+            .await
+            .unwrap()
+            .expect("no revision was pinned");
+        let at = core.store.action(&action).await.unwrap().unwrap().at;
+        // The edit is what makes the old probes miss.
+        core.store
+            .update_artifact_text(&id, "what the person wrote afterwards")
+            .await
+            .unwrap();
+        for p in &probes {
+            result_at(&core, p, &g, Some(1), at - 10).await;
+            result_at(&core, p, &g, None, at + 10).await;
+        }
+
+        let (_, undone, _) = rule_one(&core, &g, crate::store::now()).await.unwrap();
+
+        assert_eq!(undone, 0);
+        let now = core.store.get_artifact(&id).await.unwrap();
+        assert_eq!(
+            now.text, "what the person wrote afterwards",
+            "a measurement put the old text over a person's edit"
         );
     }
 

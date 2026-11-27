@@ -1004,20 +1004,32 @@ impl Store {
         )
     }
 
+    /// A person's edit. The probes rehearsed on the old wording go with it: scored against the
+    /// new text they would read as the note having got worse.
     pub async fn update_artifact_text(&self, id: &str, text: &str) -> Result<()> {
-        self.expect_updated(
-            sqlx::query!(
-                "UPDATE artifacts
-                 SET text = ?, embed_state = 'pending', embed_model = NULL,
-                     embed_rev = embed_rev + 1, updated_at = ?
-                 WHERE id = ?",
-                text,
-                super::now(),
-                id
-            )
-            .execute(&self.pool)
-            .await?,
+        let at = super::now();
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query!(
+            "UPDATE artifacts
+             SET text = ?, embed_state = 'pending', embed_model = NULL,
+                 embed_rev = embed_rev + 1, updated_at = ?
+             WHERE id = ?",
+            text,
+            at,
+            id
         )
+        .execute(&mut *tx)
+        .await?;
+        self.expect_updated(res)?;
+        sqlx::query!(
+            "UPDATE rehearsals SET retired_at = ? WHERE artifact_id = ? AND retired_at IS NULL",
+            at,
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// The caller queues the embed, as with `update_artifact_text`.
