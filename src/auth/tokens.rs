@@ -95,12 +95,21 @@ pub async fn verify(control: &Control, presented: &str) -> Result<Identity> {
         subject: t.subject,
         email: None,
         session: None,
+        token: Some(t.id),
     })
 }
 
 /// `Error::NotFound` for another subject's id too, so the route cannot enumerate ids.
 pub async fn revoke(control: &Control, id: &str, subject: &str) -> Result<()> {
     if control.revoke_token(id, subject).await? {
+        // The phone this token paired is no longer pushed to.
+        let mut notify = control.notify(subject).await?;
+        if notify["devices"]
+            .as_object_mut()
+            .is_some_and(|d| d.remove(id).is_some())
+        {
+            control.set_notify(subject, &notify).await?;
+        }
         return Ok(());
     }
     Err(Error::NotFound)

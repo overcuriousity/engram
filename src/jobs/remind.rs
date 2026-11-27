@@ -72,6 +72,65 @@ pub enum Target {
     },
 }
 
+fn unified(entry: &serde_json::Value) -> Option<Target> {
+    let endpoint = entry["endpoint"].as_str().filter(|e| !e.is_empty())?;
+    let keys = match (entry["p256dh"].as_str(), entry["auth"].as_str()) {
+        (Some(p256dh), Some(auth)) if !p256dh.is_empty() && !auth.is_empty() => {
+            Some(WebPushKeys {
+                p256dh: p256dh.into(),
+                auth: auth.into(),
+            })
+        }
+        _ => None,
+    };
+    Some(Target::UnifiedPush {
+        endpoint: endpoint.into(),
+        keys,
+    })
+}
+
+fn same_endpoint(a: &Target, b: &Target) -> bool {
+    match (a, b) {
+        (Target::UnifiedPush { endpoint: x, .. }, Target::UnifiedPush { endpoint: y, .. }) => x == y,
+        _ => false,
+    }
+}
+
+/// The devices that registered themselves, for Settings; the typed endpoint has no name.
+pub fn device_names(notify: &serde_json::Value) -> Vec<String> {
+    let devices = notify["devices"].as_object();
+    std::iter::once(&notify["unifiedpush"])
+        .chain(devices.into_iter().flatten().map(|(_, d)| d))
+        .filter_map(|d| d["device"].as_str())
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A subscription the push server no longer knows (404, 410) is taken off, wherever it stood.
+async fn forget_endpoint(core: &Core, endpoint: &str) -> Result<()> {
+    let control = &core.store.control;
+    let mut notify = control.notify(&core.store.subject).await?;
+    let Some(map) = notify.as_object_mut() else {
+        return Ok(());
+    };
+    let mut changed = false;
+    if map.get("unifiedpush").is_some_and(|u| u["endpoint"] == endpoint) {
+        map.remove("unifiedpush");
+        changed = true;
+    }
+    if let Some(devices) = map.get_mut("devices").and_then(|d| d.as_object_mut()) {
+        let before = devices.len();
+        devices.retain(|_, d| d["endpoint"] != endpoint);
+        changed |= devices.len() != before;
+    }
+    if changed {
+        tracing::info!("a push subscription is gone; no longer pushed to");
+        control.set_notify(&core.store.subject, &notify).await?;
+    }
+    Ok(())
+}
+
 /// A Gotify entry needs url and token; a UnifiedPush entry is its endpoint, with keys where both
 /// were registered.
 pub fn notify_targets(notify: &serde_json::Value) -> Vec<Target> {
@@ -87,25 +146,17 @@ pub fn notify_targets(notify: &serde_json::Value) -> Vec<Target> {
             token: token.into(),
         });
     }
-    if let Some(e) = notify["unifiedpush"]["endpoint"].as_str()
-        && !e.is_empty()
-    {
-        let keys = match (
-            notify["unifiedpush"]["p256dh"].as_str(),
-            notify["unifiedpush"]["auth"].as_str(),
-        ) {
-            (Some(p256dh), Some(auth)) if !p256dh.is_empty() && !auth.is_empty() => {
-                Some(WebPushKeys {
-                    p256dh: p256dh.into(),
-                    auth: auth.into(),
-                })
-            }
-            _ => None,
+    // The endpoint typed into Settings, then one per paired device; an endpoint named twice
+    // is pushed to once.
+    let devices = notify["devices"].as_object();
+    let entries = std::iter::once(&notify["unifiedpush"]).chain(devices.into_iter().flatten().map(|(_, d)| d));
+    for entry in entries {
+        let Some(target) = unified(entry) else {
+            continue;
         };
-        out.push(Target::UnifiedPush {
-            endpoint: e.into(),
-            keys,
-        });
+        if !out.iter().any(|t| same_endpoint(t, &target)) {
+            out.push(target);
+        }
     }
     out
 }
@@ -263,6 +314,12 @@ pub async fn push(
         role: "push",
         detail: e.to_string(),
     })?;
+    // RFC 8030 §5.1: a subscription that is gone answers 404 or 410, and asking again cannot
+    // bring it back.
+    let gone = matches!(res.status().as_u16(), 404 | 410);
+    if gone && matches!(target, Target::UnifiedPush { .. }) {
+        return Err(crate::error::Error::NotFound);
+    }
     if !res.status().is_success() {
         return Err(crate::error::Error::Inference {
             role: "push",
@@ -314,6 +371,7 @@ pub fn compose(rows: &[crate::store::moments::DueRow], now: i64) -> (String, Str
 /// `Ok` once any channel took it. Neither caller reads or writes `notified_at` here, so the ladder
 /// and a confirmation never step on each other.
 async fn deliver(
+    core: &Core,
     http: &reqwest::Client,
     sender: &Sender,
     targets: &[Target],
@@ -322,18 +380,20 @@ async fn deliver(
     let mut delivered = false;
     let mut failure = None;
     for t in targets {
-        match push(http, t, msg, sender).await {
-            Ok(()) => delivered = true,
-            Err(e) => {
+        match (push(http, t, msg, sender).await, t) {
+            (Ok(()), _) => delivered = true,
+            (Err(crate::error::Error::NotFound), Target::UnifiedPush { endpoint, .. }) => {
+                forget_endpoint(core, endpoint).await?;
+            }
+            (Err(e), _) => {
                 tracing::warn!(error = %e, "a push channel refused");
                 failure = Some(e);
             }
         }
     }
-    if !delivered {
-        return Err(failure.unwrap_or_else(|| {
-            crate::error::Error::Internal("no target was delivered to".into())
-        }));
+    // Every channel gone is not a failure to retry: there is nobody left to tell.
+    if !delivered && let Some(e) = failure {
+        return Err(e);
     }
     Ok(())
 }
@@ -355,7 +415,7 @@ pub async fn notify_now(core: &Core, title: &str, message: &str) -> Result<()> {
         return Ok(());
     }
     let msg = Message::notice(title, message, core.clock.now());
-    deliver(&http_client()?, &Sender::load(core).await?, &targets, &msg).await
+    deliver(core, &http_client()?, &Sender::load(core).await?, &targets, &msg).await
 }
 
 /// Moments are marked once any channel took the message: a retry would duplicate on the channel
@@ -371,7 +431,7 @@ pub async fn run(core: &Core) -> Result<()> {
         return Ok(());
     }
     let msg = Message::due(&owed, now);
-    deliver(&http_client()?, &Sender::load(core).await?, &targets, &msg).await?;
+    deliver(core, &http_client()?, &Sender::load(core).await?, &targets, &msg).await?;
     let ids: Vec<String> = owed.iter().map(|r| r.moment.id.clone()).collect();
     // The message is out, so the mark is the fragile step: a `?` retry would deliver the whole
     // batch again. Retried until it sticks; the cause is a brief writer lock.
@@ -1025,7 +1085,7 @@ mod tests {
                 .unwrap(),
         );
         let sender = Sender::load(&core).await.unwrap();
-        deliver(&http_client().unwrap(), &sender, &targets, &msg)
+        deliver(&core, &http_client().unwrap(), &sender, &targets, &msg)
             .await
             .unwrap();
         drop(up);
@@ -1036,6 +1096,48 @@ mod tests {
         let core = test_core().await;
         due_at(&core, crate::store::now() + 60).await;
         assert!(run_after_of(&core).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_that_answers_gone_is_forgotten() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let core = test_core().await;
+        let gone = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(410))
+            .mount(&gone)
+            .await;
+        let live = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&live)
+            .await;
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({
+                    "unifiedpush": {"endpoint": format!("{}/typed", gone.uri())},
+                    "devices": {
+                        "t-old": {"endpoint": format!("{}/old", gone.uri())},
+                        "t-new": {"endpoint": format!("{}/new", live.uri())},
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+
+        notify_now(&core, "t", "m").await.unwrap();
+
+        let left = core.store.control.notify(&core.store.subject).await.unwrap();
+        assert_eq!(
+            notify_targets(&left),
+            vec![Target::UnifiedPush {
+                endpoint: format!("{}/new", live.uri()),
+                keys: None
+            }],
+            "a subscription the push server deleted is pushed to for ever"
+        );
     }
 
     #[tokio::test]

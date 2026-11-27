@@ -129,10 +129,8 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Re
             .as_str()
             .unwrap_or_default()
             .to_string(),
-        up_device: notify["unifiedpush"]["device"]
-            .as_str()
-            .filter(|d| !d.is_empty())
-            .map(str::to_string),
+        up_device: Some(crate::jobs::remind::device_names(&notify).join(", "))
+            .filter(|d| !d.is_empty()),
         up_legacy: crate::jobs::remind::notify_targets(&notify)
             .iter()
             .any(|t| {
@@ -322,10 +320,8 @@ pub(crate) async fn notify_setting(tenant: &Tenant) -> Result<NotifySetting> {
             .as_str()
             .unwrap_or_default()
             .to_string(),
-        up_device: notify["unifiedpush"]["device"]
-            .as_str()
-            .filter(|d| !d.is_empty())
-            .map(str::to_string),
+        up_device: Some(crate::jobs::remind::device_names(&notify).join(", "))
+            .filter(|d| !d.is_empty()),
         up_legacy: crate::jobs::remind::notify_targets(&notify)
             .iter()
             .any(|t| {
@@ -366,6 +362,10 @@ pub(crate) async fn set_notify(
             true => stored["unifiedpush"].clone(),
             false => serde_json::json!({ "endpoint": endpoint }),
         };
+    }
+    // The form knows nothing of the devices that registered themselves; they stay.
+    if let Some(devices) = stored.get("devices") {
+        notify["devices"] = devices.clone();
     }
     control.set_notify(&tenant.user.subject, &notify).await?;
     tenant.core.store.rearm_remind().await?;

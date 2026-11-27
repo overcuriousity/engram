@@ -413,6 +413,7 @@ impl OidcClient {
             subject,
             email,
             session: None,
+            token: None,
         })
     }
 }

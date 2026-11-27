@@ -749,6 +749,7 @@ mod tests {
             subject: "sub-1".into(),
             email: Some("same@example.com".into()),
             session: None,
+            token: None,
         };
         super::bind_to_issuer(&st, &who, "https://idp.example")
             .await

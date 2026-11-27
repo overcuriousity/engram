@@ -14,6 +14,8 @@ pub struct Identity {
     pub email: Option<String>,
     /// `None` for bearer tokens on purpose: agent sessions sharing a token must not share a live sitting.
     pub session: Option<String>,
+    /// The API token that carried the request: what tells one paired device from another.
+    pub token: Option<String>,
 }
 
 pub const SESSION_IDLE_DAYS: i64 = 30;
@@ -115,6 +117,7 @@ impl Identity {
                     subject: sub,
                     email: None,
                     session: None,
+                    token: None,
                 });
             }
             return Err(Error::Unauthorized);
@@ -136,6 +139,7 @@ impl Identity {
             subject,
             email,
             session: session.id().map(|id| id.to_string()),
+            token: None,
         })
     }
 }
