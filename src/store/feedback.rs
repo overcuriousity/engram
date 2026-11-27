@@ -900,29 +900,60 @@ impl Store {
     }
 
     pub async fn purge_feedback(&self) -> Result<u64> {
-        // `search_candidates` goes through ON DELETE CASCADE.
-        let searches = sqlx::query!("DELETE FROM search_events")
-            .execute(&self.pool)
+        // One transaction: half a purge would leave wording the operator was told is gone.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut gone = 0;
+        // `search_candidates` goes through ON DELETE CASCADE. Centroids are the situations
+        // averaged; their copies on the points are cleared by `Core::forget_situations`.
+        gone += sqlx::query!("DELETE FROM search_events")
+            .execute(&mut *tx)
             .await?
             .rows_affected();
-        // Centroids are the situations averaged, so they go too. Their copies on the points are
-        // cleared by `Core::forget_situations`.
-        let situations = sqlx::query!("DELETE FROM context_events")
-            .execute(&self.pool)
+        gone += sqlx::query!("DELETE FROM context_events")
+            .execute(&mut *tx)
             .await?
             .rows_affected();
-        let profiles = sqlx::query!("DELETE FROM context_clusters")
-            .execute(&self.pool)
+        gone += sqlx::query!("DELETE FROM context_clusters")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        gone += sqlx::query!("DELETE FROM ask_events")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        gone += sqlx::query!("DELETE FROM decide_events")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        gone += sqlx::query!("DELETE FROM interaction_events")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        gone += sqlx::query!("DELETE FROM pursuits")
+            .execute(&mut *tx)
             .await?
             .rows_affected();
         // Observations hold the same queries and nothing cascades to them.
-        Ok(searches
-            + situations
-            + profiles
-            + self.purge_asks().await?
-            + self.purge_decisions().await?
-            + self.purge_pursuits().await?
-            + self.purge_observations().await?)
+        gone += sqlx::query!("DELETE FROM observations")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        // What was derived from the wording keeps it: a gap's question, its cluster's label,
+        // and the queries an evaluation lists beside its numbers.
+        sqlx::query!("DELETE FROM gap_rejections")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query!("DELETE FROM gap_coverage")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query!("DELETE FROM gap_clusters")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query!("UPDATE eval_runs SET diff = '[]'")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(gone)
     }
 
     /// The judge door is excluded: a benchmark query is not a need.
@@ -1515,6 +1546,83 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(candidates, 1, "and the pool that answered it");
+    }
+
+    /// What the gap pass and the evaluation keep of a search's wording, planted directly.
+    async fn wording_kept_elsewhere(store: &Store) {
+        // runtime: rows planted without the passes that write them.
+        sqlx::query(
+            "INSERT INTO gap_clusters (key, label, labelled_by, members, created_at)
+             VALUES ('k', 'how to mount', 'terms', '[]', 0)",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        // runtime: as above.
+        sqlx::query(
+            "INSERT INTO eval_runs (id, created_at, judged_count, pairs_used, pairs_skipped,
+                base_params, base_recall, base_mrr, best_params, best_recall, best_mrr, diff)
+             VALUES ('r', 0, 1, 1, 0, '{}', 0.5, 0.5, '{}', 0.5, 0.5,
+                     '[{\"query\":\"how to mount\",\"base\":1,\"new\":2}]')",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn text_of(store: &Store, sql: &'static str) -> Vec<String> {
+        // runtime: one of two fixed statements below.
+        sqlx::query_scalar(sql)
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_purge_leaves_no_typed_wording_in_what_was_derived_from_it() {
+        let store = Store::memory().await.unwrap();
+        store
+            .record_search(ev("how to mount", Door::Ui), 15)
+            .await
+            .unwrap();
+        wording_kept_elsewhere(&store).await;
+
+        store.purge_feedback().await.unwrap();
+
+        assert!(queries(&store).await.is_empty());
+        assert!(
+            text_of(&store, "SELECT label FROM gap_clusters")
+                .await
+                .is_empty()
+        );
+        let diffs = text_of(&store, "SELECT diff FROM eval_runs").await;
+        assert_eq!(diffs, ["[]"], "the run's numbers stay, its queries do not");
+    }
+
+    #[tokio::test]
+    async fn a_purge_that_fails_part_way_deletes_nothing() {
+        let store = Store::memory().await.unwrap();
+        store
+            .record_search(ev("how to mount", Door::Ui), 15)
+            .await
+            .unwrap();
+        wording_kept_elsewhere(&store).await;
+        // runtime: a trigger standing in for a write error late in the purge.
+        sqlx::query(
+            "CREATE TRIGGER refuse BEFORE DELETE ON gap_clusters
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        assert!(store.purge_feedback().await.is_err());
+
+        assert_eq!(
+            queries(&store).await,
+            ["how to mount"],
+            "half a purge was kept"
+        );
     }
 
     #[tokio::test]
