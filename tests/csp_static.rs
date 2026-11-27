@@ -565,7 +565,11 @@ fn the_whisper_shim_lets_no_exception_out() {
     // An exception unwinding out of `extern "C"` into Rust is undefined behaviour, and whisper.cpp
     // throws from state setup and allocates throughout.
     let shim = tracked("vendor/whisper.cpp/engram_whisper.cpp");
-    for entry in ["engram_whisper_open(", "engram_whisper_run(", "engram_whisper_close("] {
+    for entry in [
+        "engram_whisper_open(",
+        "engram_whisper_run(",
+        "engram_whisper_close(",
+    ] {
         let from = shim.find(entry).unwrap_or_else(|| panic!("no {entry}"));
         let body = &shim[from..];
         let end = body.find("\n}\n").unwrap_or(body.len());

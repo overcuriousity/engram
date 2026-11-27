@@ -44,9 +44,9 @@ impl InferenceGate {
 
     /// `paced`: serve the cooldown before and start one after; a call exempt from one is exempt from both.
     async fn acquire(&self, paced: bool) -> BackgroundPermit<'_> {
-        // Turn before the wait, so the holder re-reads the cooldown after the call ahead finishes.
-        let turn = self.turn.acquire().await.ok();
-        loop {
+        let turn = loop {
+            // Turn before the wait, so the holder re-reads the cooldown after the call ahead finishes.
+            let turn = self.turn.acquire().await.ok();
             // Registered before the guard drops: `notify_waiters` wakes only registered waiters and leaves no permit.
             let resumed = self.resumed.notified();
             tokio::pin!(resumed);
@@ -61,25 +61,29 @@ impl InferenceGate {
                     resumed.as_mut().enable();
                     None
                 } else if !paced {
-                    break;
+                    break turn;
                 } else {
                     let now = Instant::now();
                     match st.last_finished.map(|t| t + self.cooldown) {
                         Some(t) if t > now => Some(t - now),
-                        _ => break,
+                        _ => break turn,
                     }
                 }
             };
+            // The turn is handed back for the wait: an embed, which serves no cooldown, must not
+            // stand behind a generation that is only waiting one out.
+            drop(turn);
             match wait {
                 Some(d) => tokio::time::sleep(d).await,
                 // No deadline; the lease wakes us when it drops.
                 None => resumed.await,
             }
-        }
+        };
         BackgroundPermit {
             gate: self,
             _turn: turn,
             paced,
+            said: false,
         }
     }
 
@@ -107,14 +111,27 @@ pub struct BackgroundPermit<'a> {
     // `None` only if the semaphore were closed, which nothing does.
     _turn: Option<SemaphorePermit<'a>>,
     paced: bool,
+    said: bool,
 }
 
 impl BackgroundPermit<'_> {
-    /// The cooldown starts when the call ended, not when the caller says so.
-    pub fn finished(self) {
-        if self.paced {
+    /// The cooldown starts when the call ended, not when the caller gets round to dropping this.
+    pub fn finished(mut self) {
+        self.stamp();
+    }
+
+    fn stamp(&mut self) {
+        if self.paced && !self.said {
+            self.said = true;
             self.gate.call_finished();
         }
+    }
+}
+
+/// An error path that returns before `finished` used the GPU all the same.
+impl Drop for BackgroundPermit<'_> {
+    fn drop(&mut self) {
+        self.stamp();
     }
 }
 
@@ -181,6 +198,41 @@ mod tests {
 
         drop(lease);
         waiter.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_embed_does_not_wait_out_a_generations_cooldown() {
+        let g = gate(600);
+        g.call_finished();
+        // A generation is waiting for the gap to pass.
+        let g2 = Arc::clone(&g);
+        let generation = tokio::spawn(async move {
+            g2.background().await.finished();
+        });
+        tokio::task::yield_now().await;
+
+        let started = tokio::time::Instant::now();
+        g.background_light().await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "an embed stood behind a generation that was only waiting"
+        );
+        generation.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_that_ended_without_saying_so_still_starts_the_cooldown() {
+        let g = gate(5);
+        // An error path returned early: the permit was dropped, `finished` never called.
+        drop(g.background().await);
+        let started = tokio::time::Instant::now();
+        g.background().await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(5),
+            "a failed generation was followed by the next one at once"
+        );
     }
 
     #[tokio::test(start_paused = true)]
