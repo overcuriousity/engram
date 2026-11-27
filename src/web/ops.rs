@@ -106,16 +106,24 @@ async fn reactivate_ui(
 }
 
 pub(crate) async fn undo_merge(tenant: &Tenant, aid: &str) -> crate::error::Result<()> {
+    use crate::jobs::merge::Undone;
     use crate::store::actions::UndoneBy;
-    // A later merge took this one's supersession since the page rendered; say so.
-    if let crate::jobs::merge::Undone::HiddenBehind { later } =
-        crate::jobs::merge::undo(&tenant.core, aid, crate::store::pairs::DecidedBy::Operator)
-            .await?
+    // What changed since the page rendered; say so.
+    match crate::jobs::merge::undo(&tenant.core, aid, crate::store::pairs::DecidedBy::Operator)
+        .await?
     {
-        return Err(crate::error::Error::Validation(format!(
-            "this merge was itself merged into {later} since this page was drawn — \
-             undo that one first, and this comes back with it"
-        )));
+        Undone::TakenApart => {}
+        Undone::HiddenBehind { later } => {
+            return Err(crate::error::Error::Validation(format!(
+                "this merge was itself merged into {later} since this page was drawn — \
+                 undo that one first, and this comes back with it"
+            )));
+        }
+        Undone::InTrash => {
+            return Err(crate::error::Error::Validation(
+                "this merge is in the Trash — restore it first".into(),
+            ));
+        }
     }
     tenant
         .core

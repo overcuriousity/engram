@@ -144,6 +144,22 @@ impl Store {
     }
 
     /// Unlike `roots_of`, excludes roots an operator restored.
+    /// The live synthesized artifact written from `root` alone under `cue`, if an earlier
+    /// attempt stored one.
+    pub async fn rescue_of(&self, root: &str, cue: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT a.id AS "id!" FROM artifact_sources s
+                 JOIN artifacts a ON a.id = s.child_id
+                WHERE s.root_id = ? AND a.provenance = 'synthesized' AND a.status = 'active'
+                  AND EXISTS (SELECT 1 FROM json_each(a.cues) WHERE value = ?)
+                ORDER BY a.created_at DESC, a.id DESC LIMIT 1"#,
+            root,
+            cue
+        )
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn roots_to_hide(&self, child_id: &str) -> Result<Vec<String>> {
         Ok(sqlx::query_scalar!(
             "SELECT root_id FROM artifact_sources

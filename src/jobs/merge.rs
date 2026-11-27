@@ -109,6 +109,12 @@ pub async fn undo(
         )));
     }
 
+    // In the Trash: its sources were freed when it went there. Deprecating it now would move
+    // it out of the Trash with `trashed_at` still set. A value, not `Err`, as below.
+    if m.status == crate::store::artifacts::ArtifactStatus::Trashed {
+        return Ok(Undone::InTrash);
+    }
+
     // A merge hidden behind a later one: `deprecate_with` refuses it and its roots now point at the
     // later merge. Report that nothing was done, not `Err`, which would wedge rule 1's idle pass.
     if let Some(later) = m.superseded_by.clone() {
@@ -185,6 +191,8 @@ pub async fn undo(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Undone {
     TakenApart,
+    /// A person deleted it, which already freed its sources; there is nothing to take apart.
+    InTrash,
     /// A later merge subsumed this one; carries the merge standing in front of it.
     HiddenBehind {
         later: String,
@@ -814,6 +822,34 @@ mod tests {
                 "{root} is in results beside the merge that was written from it"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_merge_in_the_trash_is_not_taken_apart() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &m.id).await.unwrap();
+        core.trash_artifact(&m.id).await.unwrap();
+
+        let out = undo(&core, &m.id, crate::store::pairs::DecidedBy::Evidence)
+            .await
+            .unwrap();
+
+        assert_eq!(out, Undone::InTrash);
+        assert!(!out.happened());
+        let now = core.store.get_artifact(&m.id).await.unwrap();
+        assert_eq!(
+            now.status,
+            crate::store::artifacts::ArtifactStatus::Trashed,
+            "the merge left the Trash by the back door"
+        );
     }
 
     #[tokio::test]
