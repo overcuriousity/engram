@@ -24,6 +24,7 @@ pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> O
             subject: cfg.username.clone(),
             email: None,
             session: None,
+            token: None,
         })
     } else {
         None

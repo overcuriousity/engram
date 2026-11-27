@@ -49,7 +49,14 @@ fn safe_next(raw: Option<&str>) -> Option<String> {
 
 const AFTER_LOGIN: &str = "/ui/search";
 
-async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> Result<Response> {
+/// Where the pre-login session keeps the `state` it was sent off with.
+const OIDC_STATE: &str = "oidc_state";
+
+async fn login_page(
+    State(st): State<AppState>,
+    session: tower_sessions::Session,
+    Query(q): Query<LoginQuery>,
+) -> Result<Response> {
     match st.auth.mode {
         AuthMode::Oidc => {
             let client = st
@@ -61,7 +68,19 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
                 let (url, mut pending) = client.authorize_url()?;
                 // The provider hands back only `state`, so the destination is kept with the pending attempt.
                 pending.next = safe_next(q.go.as_deref());
-                st.auth.pending.put(pending);
+                // The callback is honoured only in this browser: a `code` and `state` passed
+                // to someone else would otherwise sign them in as the sender.
+                session
+                    .insert(OIDC_STATE, &pending.csrf)
+                    .await
+                    .map_err(|e| Error::Store(format!("session: {e}")))?;
+                if !st.auth.pending.put(pending) {
+                    let busy = (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "too many sign-ins in progress",
+                    );
+                    return Ok(busy.into_response());
+                }
                 return Ok(Redirect::to(&url).into_response());
             }
             Ok(HtmlTemplate(LoginTemplate {
@@ -100,8 +119,14 @@ async fn login_submit(
     };
     let cfg = st.auth.local.as_ref().ok_or(Error::NotFound)?;
 
-    let Some(identity) = crate::auth::local::check_credentials(cfg, &f.username, &f.password)
-    else {
+    // argon2id is tens of milliseconds of CPU: off the executor, so a guess stalls no stream.
+    let (local, username, password) = (cfg.clone(), f.username.clone(), f.password.clone());
+    let checked = tokio::task::spawn_blocking(move || {
+        crate::auth::local::check_credentials(&local, &username, &password)
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("sign-in check: {e}")))?;
+    let Some(identity) = checked else {
         tracing::warn!(username = %f.username, "failed local sign-in");
         return Ok((
             StatusCode::UNAUTHORIZED,
@@ -146,6 +171,14 @@ async fn callback(
     };
 
     let client = st.auth.oidc.as_ref().ok_or(Error::NotFound)?;
+    let began: Option<String> = session
+        .remove(OIDC_STATE)
+        .await
+        .map_err(|e| Error::Store(format!("session: {e}")))?;
+    if began.as_deref() != Some(state_param.as_str()) {
+        tracing::warn!("a sign-in came back to a browser that did not begin it");
+        return Err(Error::Unauthorized);
+    }
     // Single use: this also defeats a replayed callback URL.
     let pending = st
         .auth
@@ -201,17 +234,35 @@ async fn logout(session: tower_sessions::Session) -> Result<Response> {
     Ok(Redirect::to("/auth/login").into_response())
 }
 
+/// Each login begun under OIDC holds a pending attempt for ten minutes, so the page is paced too.
+pub const LOGIN_PAGE_PER_MINUTE: u32 = 30;
+pub const LOGIN_PAGE_BURST: u32 = 20;
 pub const SIGN_IN_PER_MINUTE: u32 = 10;
+/// Over every address together: a holder of many addresses gets this, not five guesses each.
+pub const SIGN_IN_ALL_PER_MINUTE: u32 = 60;
+pub const SIGN_IN_ALL_BURST: u32 = 30;
 pub const SIGN_IN_BURST: u32 = 5;
 
 pub fn auth_router() -> Router<AppState> {
     Router::new()
         .route(
             "/auth/login",
-            get(login_page).merge(post(login_submit).layer(crate::web::security::rate_limit(
-                SIGN_IN_PER_MINUTE,
-                SIGN_IN_BURST,
-            ))),
+            get(login_page)
+                .layer(crate::web::security::rate_limit(
+                    LOGIN_PAGE_PER_MINUTE,
+                    LOGIN_PAGE_BURST,
+                ))
+                .merge(
+                    post(login_submit)
+                        .layer(crate::web::security::rate_limit(
+                            SIGN_IN_PER_MINUTE,
+                            SIGN_IN_BURST,
+                        ))
+                        .layer(crate::web::security::rate_limit_all(
+                            SIGN_IN_ALL_PER_MINUTE,
+                            SIGN_IN_ALL_BURST,
+                        )),
+                ),
         )
         .route("/auth/callback", get(callback))
         .route("/auth/logout", post(logout))
@@ -524,6 +575,178 @@ mod tests {
         );
     }
 
+    async fn oidc_app() -> (
+        axum::Router,
+        crate::web::state::AppState,
+        wiremock::MockServer,
+    ) {
+        let core = crate::core::test_support::test_core().await;
+        let mut st =
+            crate::web::test_support::state_over(core, crate::config::AuthMode::Oidc).await;
+        let (idp, client) = crate::auth::oidc::fake_client(&st.auth.deployment.base()).await;
+        st.auth = std::sync::Arc::new(crate::web::state::AuthContext {
+            mode: crate::config::AuthMode::Oidc,
+            local: None,
+            oidc: Some(client),
+            pending: crate::auth::oidc::PendingStore::new(),
+            deployment: st.auth.deployment.clone(),
+        });
+        (crate::web::router(st.clone()), st, idp)
+    }
+
+    /// Starts a login; the `state` the provider will hand back, and the browser's cookie.
+    async fn begin(app: &axum::Router) -> (String, String) {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/login?go=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(res.status().is_redirection(), "{}", res.status());
+        let to = res.headers()["location"].to_str().unwrap().to_string();
+        let state = url::Url::parse(&to)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string())
+            .expect("the provider is sent a state");
+        let cookie = res
+            .headers()
+            .get("set-cookie")
+            .map(|c| c.to_str().unwrap().split(';').next().unwrap().to_string())
+            .unwrap_or_default();
+        (state, cookie)
+    }
+
+    async fn come_back(app: &axum::Router, state: &str, cookie: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/auth/callback?code=x&state={state}"))
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn a_callback_is_good_only_in_the_browser_that_began_the_login() {
+        let (app, st, _idp) = oidc_app().await;
+
+        // Handed to someone else: their browser never began this login.
+        let (sent_on, _) = begin(&app).await;
+        come_back(&app, &sent_on, "").await;
+        assert!(
+            st.auth.pending.take(&sent_on).is_some(),
+            "a browser that never began the login got as far as the code exchange"
+        );
+
+        // The browser that began it is let through to the exchange, which spends the attempt.
+        let (own, cookie) = begin(&app).await;
+        come_back(&app, &own, &cookie).await;
+        assert!(st.auth.pending.take(&own).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_token_of_someone_taken_off_the_list_stops_working() {
+        let core = crate::core::test_support::test_core().await;
+        let (_, token) = crate::auth::tokens::mint(&core.store.control, "laptop", "user-1", None)
+            .await
+            .unwrap();
+        let status_as = |subs: &'static [&'static str]| {
+            let (core, token) = (core.clone(), token.clone());
+            async move {
+                let mut st =
+                    crate::web::test_support::state_over(core, crate::config::AuthMode::Oidc).await;
+                let base = st.auth.deployment.base();
+                let (_idp, client) = crate::auth::oidc::fake_client_admitting(&base, subs).await;
+                st.auth = std::sync::Arc::new(crate::web::state::AuthContext {
+                    mode: crate::config::AuthMode::Oidc,
+                    local: None,
+                    oidc: Some(client),
+                    pending: crate::auth::oidc::PendingStore::new(),
+                    deployment: st.auth.deployment.clone(),
+                });
+                crate::web::router(st)
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/status")
+                            .header("authorization", format!("Bearer {token}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(status_as(&["user-1"]).await, StatusCode::OK);
+        assert_eq!(
+            status_as(&["someone-else"]).await,
+            StatusCode::UNAUTHORIZED,
+            "the list was edited and the token went on working"
+        );
+    }
+
+    #[tokio::test]
+    async fn guesses_spread_over_many_addresses_still_meet_a_ceiling() {
+        use axum::extract::connect_info::MockConnectInfo;
+        // OIDC mode refuses the form before any hashing, so only the limiters are at work.
+        let (_router, st, _idp) = oidc_app().await;
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 4000));
+        let app = crate::web::app(st.clone(), &st.auth.deployment).layer(MockConnectInfo(peer));
+        let mut refused = 0;
+        for n in 0..(super::SIGN_IN_ALL_BURST + 10) {
+            let mut req = form("/auth/login", "username=dev&password=guess");
+            let headers = req.headers_mut();
+            headers.insert("host", "engram.test".parse().unwrap());
+            headers.insert("origin", "https://engram.test".parse().unwrap());
+            headers.insert("x-forwarded-for", format!("198.51.{n}.7").parse().unwrap());
+            if app.clone().oneshot(req).await.unwrap().status() == StatusCode::TOO_MANY_REQUESTS {
+                refused += 1;
+            }
+        }
+        assert_eq!(
+            refused, 10,
+            "each address got its own five guesses, without end"
+        );
+    }
+
+    #[tokio::test]
+    async fn beginning_logins_without_end_is_slowed_down() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let (_router, st, _idp) = oidc_app().await;
+        // The secured app: the limiter keys on the client address `secure` works out.
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 4000));
+        let app = crate::web::app(st.clone(), &st.auth.deployment).layer(MockConnectInfo(peer));
+        let mut refused = 0;
+        for _ in 0..40 {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/auth/login?go=1")
+                        .header("host", "engram.test")
+                        .header("x-forwarded-for", "203.0.113.9")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if res.status() == StatusCode::TOO_MANY_REQUESTS {
+                refused += 1;
+            }
+        }
+        assert!(refused > 0, "forty logins begun at once, none refused");
+    }
+
     #[tokio::test]
     async fn an_oidc_user_from_another_issuer_is_refused() {
         let core = crate::core::test_support::test_core().await;
@@ -532,6 +755,7 @@ mod tests {
             subject: "sub-1".into(),
             email: Some("same@example.com".into()),
             session: None,
+            token: None,
         };
         super::bind_to_issuer(&st, &who, "https://idp.example")
             .await

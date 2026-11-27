@@ -86,6 +86,7 @@ impl Core {
         let core = self.clone();
         let req = req.clone();
         let origin = origin.into();
+        self.mark_used();
 
         async_stream::try_stream! {
             if req.q.trim().is_empty() {
@@ -426,7 +427,7 @@ impl Core {
         // Reached artifacts are appended after the cliff and never enter its scores; the ranked
         // hits are finished first, since their disagreements decide what the reach brings in.
         self.finish_hits(&mut hits).await;
-        self.reach_sideways(&mut hits, cliff_at).await;
+        self.reach_sideways(&mut hits, cliff_at, req).await;
         // Neighbours came off the store and missed the titling and disagreement read.
         self.finish_hits(&mut hits[ranked..]).await;
 
@@ -597,7 +598,12 @@ impl Core {
 
     /// One hop sideways from the best hits: corpus neighbours and one-hop associations.
     /// Structure, not search, so it costs no inference; every failure is best-effort.
-    async fn reach_sideways(&self, hits: &mut Vec<SearchResult>, cliff_at: Option<usize>) {
+    async fn reach_sideways(
+        &self,
+        hits: &mut Vec<SearchResult>,
+        cliff_at: Option<usize>,
+        req: &AskRequest,
+    ) {
         let anchors = retrieve::anchor_count(cliff_at, hits.len());
         if anchors == 0 {
             return;
@@ -673,6 +679,16 @@ impl Core {
                 continue;
             };
             if !c.in_results() {
+                continue;
+            }
+            // The question's own filter, as search applies it to what it reaches (`associated`):
+            // a neighbour outside it would be cited in an answer that was asked to leave it out.
+            if !req.tags.iter().all(|t| c.tags.contains(t))
+                || req
+                    .category
+                    .as_ref()
+                    .is_some_and(|want| c.category.as_ref() != Some(want))
+            {
                 continue;
             }
             live.push((c, via.clone(), reason.clone()));
@@ -1629,6 +1645,55 @@ mod tests {
                 "a neighbour named an anchor that is not one of the ranked hits"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_reach_stays_inside_the_questions_own_filter() {
+        let core = test_core().await;
+        seed(&core, 5, 4).await;
+        // One chunk carries the tag; the chunks beside it in the document do not.
+        let all = core.store.list_all_artifact_ids().await.unwrap();
+        let mut tagged = None;
+        for id in &all {
+            let c = core.store.get_artifact(id).await.unwrap();
+            if c.ordinal == 2 {
+                core.store
+                    .update_artifact_tags(id, &["keep".to_string()])
+                    .await
+                    .unwrap();
+                let fresh = core.store.get_artifact(id).await.unwrap();
+                core.vectors
+                    .set_payload(&crate::vector::VectorPayload::edited(&fresh))
+                    .await
+                    .unwrap();
+                tagged = Some(id.clone());
+            }
+        }
+        let tagged = tagged.expect("the third chunk");
+
+        let out = core
+            .ask(
+                &AskRequest {
+                    q: "chunk".into(),
+                    limit: Some(5),
+                    tags: vec!["keep".into()],
+                    category: None,
+                },
+                Door::Api,
+            )
+            .await
+            .unwrap();
+
+        let cited: Vec<&str> = out
+            .citations
+            .iter()
+            .map(|c| c.artifact_id.as_str())
+            .collect();
+        assert_eq!(
+            cited,
+            [tagged.as_str()],
+            "a question about one tag was answered from notes outside it"
+        );
     }
 
     #[tokio::test]

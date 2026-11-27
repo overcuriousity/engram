@@ -117,7 +117,19 @@ pub async fn verify(
             control_path.display()
         )));
     }
-    let control = Control::connect(&cfg.store.control_path).await?;
+    let damage = crate::backup::sqlite::unsound(control_path).await?;
+    if let Some(first) = damage.first() {
+        return Err(Error::Store(format!(
+            "the control database is damaged inside: {first} ({} in all)",
+            damage.len()
+        )));
+    }
+    // `connect` migrates: right after a restore, which reconciles, and wrong for a command that
+    // was only asked to look and may run beside an older server.
+    let control = match reconcile {
+        true => Control::connect(&cfg.store.control_path).await?,
+        false => Control::open_read_only(&cfg.store.control_path).await?,
+    };
     let users = control.users().await?;
     let stray = stray_files(cfg, &users)?;
     let chosen: Vec<&User> = match user {
@@ -197,6 +209,14 @@ async fn tenant(
         return cells;
     }
     cells.push(("database", Cell::Pass(format!("{}.db", user.slug))));
+    cells.push((
+        "integrity",
+        match crate::backup::sqlite::unsound(&path).await {
+            Ok(found) if found.is_empty() => Cell::Pass("ok".into()),
+            Ok(found) => Cell::Fail(format!("{} ({} in all)", found[0], found.len())),
+            Err(e) => Cell::Fail(e.to_string()),
+        },
+    ));
 
     let alias = format!("{}_{}", cfg.vector.collection, user.slug);
     let dim = cfg.infer.embed.dim;
@@ -229,8 +249,12 @@ async fn tenant(
         }
     };
 
-    let store = match Store::connect(&path.to_string_lossy(), control.clone(), &user.subject).await
-    {
+    let (at, control, subject) = (path.to_string_lossy(), control.clone(), &user.subject);
+    let opened = match reconcile {
+        true => Store::connect(&at, control, subject).await,
+        false => Store::open_read_only(&at, control, subject).await,
+    };
+    let store = match opened {
         Ok(s) => s,
         Err(e) => {
             cells.push(("recipe", Cell::Fail(format!("cannot open: {e}"))));
@@ -380,6 +404,52 @@ mod tests {
             .unwrap();
         c.pool.close().await;
         n
+    }
+
+    #[tokio::test]
+    async fn a_database_sqlite_calls_damaged_fails_the_check() {
+        let base = backed_up().await;
+        let slug = check(&base, false).await.tenants[0].slug.clone();
+        assert!(matches!(
+            cell(&check(&base, false).await, &slug, "integrity"),
+            Some(Cell::Pass(_))
+        ));
+        let db = Path::new(&base.cfg.store.dir).join(format!("{slug}.db"));
+        crate::backup::sqlite::tests::orphan(&db).await;
+
+        let r = check(&base, false).await;
+        assert!(is_fail(cell(&r, &slug, "integrity")), "{r}");
+        assert_eq!(r.verdict(), Verdict::Fail);
+    }
+
+    #[tokio::test]
+    async fn a_check_that_reconciles_nothing_writes_nothing() {
+        use sqlx::Connection;
+        let base = backed_up().await;
+        // What only a migration touches: a token of the scheme an upgrade removes.
+        let url = format!("sqlite://{}", base.cfg.store.control_path);
+        let mut raw = sqlx::SqliteConnection::connect(&url).await.unwrap();
+        // runtime: the test plants a row behind the store's back.
+        sqlx::query(
+            "INSERT INTO api_tokens (id, name, token_hash, subject, created_at, scheme)
+             SELECT 't-old', 'old', 'h', subject, 0, 1 FROM users LIMIT 1",
+        )
+        .execute(&mut raw)
+        .await
+        .unwrap();
+
+        let r = check(&base, false).await;
+        assert_eq!(r.verdict(), Verdict::Pass, "{r}");
+
+        // runtime: read behind the store's back, as above.
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_tokens WHERE id = 't-old'")
+            .fetch_one(&mut raw)
+            .await
+            .unwrap();
+        assert_eq!(
+            left, 1,
+            "--verify-stores migrated a base it was only asked to look at"
+        );
     }
 
     #[tokio::test]

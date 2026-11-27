@@ -54,15 +54,47 @@ pub struct Working {
     pub line: Arc<std::sync::atomic::AtomicU32>,
     /// Held here so a transient `Core` spends the same tick as the serving one.
     pub calls: Arc<crate::core::judging::Meter>,
+    /// When someone last searched or asked; see `Core::mark_used`.
+    pub used: Arc<std::sync::atomic::AtomicI64>,
+    /// Held here so a repair pass on a transient `Core` excludes the request it races.
+    pub corpus_locks: CorpusLocks,
+    pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The process's, not the subject's: one set of endpoints and one machine serve every tenant.
+    pub shared: Shared,
 }
 
-impl Default for Working {
-    fn default() -> Self {
+/// What every tenant of one process waits at.
+#[derive(Clone)]
+pub struct Shared {
+    pub gate: Arc<crate::infer::gate::InferenceGate>,
+    pub decodes: Arc<tokio::sync::Semaphore>,
+}
+
+impl Shared {
+    pub fn new(cfg: &Config) -> Shared {
+        Shared {
+            gate: Arc::new(crate::infer::gate::InferenceGate::new(
+                std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
+            )),
+            decodes: Arc::new(tokio::sync::Semaphore::new(
+                crate::core::image::MAX_CONCURRENT_DECODES,
+            )),
+        }
+    }
+}
+
+impl Working {
+    /// One subject's working state in front of `shared`.
+    pub fn new(shared: Shared) -> Working {
         Working {
             sittings: Arc::new(Default::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             calls: Arc::new(Default::default()),
+            used: Arc::new(Default::default()),
+            corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            shared,
         }
     }
 }
@@ -183,7 +215,9 @@ pub struct Core {
     pub trail_gen: Arc<std::sync::atomic::AtomicU64>,
     /// Shared by every clone and across registry evictions; see `Working`.
     pub sittings: Arc<crate::core::sitting::Sittings>,
-    /// Shared by every clone: the point is one queue of calls in front of one GPU.
+    /// See `mark_used`.
+    pub used: Arc<std::sync::atomic::AtomicI64>,
+    /// Shared by every clone and every tenant (`Shared`): one queue of calls in front of one GPU.
     pub gate: Arc<crate::infer::gate::InferenceGate>,
     /// One lock per document; reach for it through `corpus_lock`.
     pub corpus_locks: CorpusLocks,
@@ -238,6 +272,21 @@ impl Core {
             return Ok(true);
         }
         Ok(!self.budget(job).await?.spent())
+    }
+
+    /// Whether the text is still the one the condensation wrote. A row from before `rev` was
+    /// recorded cannot say, and counts as untouched.
+    pub async fn condensation_stands(
+        &self,
+        a: &crate::store::actions::Action,
+    ) -> crate::error::Result<bool> {
+        let wrote = serde_json::from_str::<serde_json::Value>(&a.evidence_json)
+            .ok()
+            .and_then(|v| v.get("rev").and_then(|n| n.as_i64()));
+        let Some(wrote) = wrote else {
+            return Ok(true);
+        };
+        Ok(self.store.get_artifact(&a.subject_id).await?.embed_rev == wrote)
     }
 
     /// Put back the version a condensation retired; called by the button and by the base.
@@ -381,7 +430,7 @@ impl Core {
     }
 
     pub fn from_config(cfg: &Config, vectors: Arc<dyn VectorStore>, store: Store) -> Core {
-        Core::from_config_with(cfg, vectors, store, Working::default())
+        Core::from_config_with(cfg, vectors, store, Working::new(Shared::new(cfg)))
     }
 
     /// The registry's door: a reopened tenant keeps its working memory.
@@ -485,7 +534,10 @@ impl Core {
             learn: cfg.learn.clone(),
             decide_cfg: cfg.decide.clone(),
             feedback: cfg.feedback.clone(),
-            capture: cfg.capture.clone(),
+            capture: crate::config::CaptureConfig {
+                fetch_private: Some(cfg.fetch_reaches_private()),
+                ..cfg.capture.clone()
+            },
             associate: cfg.associate.clone(),
             activation: cfg.activation.clone(),
             promote: cfg.promote.clone(),
@@ -500,16 +552,24 @@ impl Core {
             model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             trail_gen: Default::default(),
             sittings: working.sittings,
-            gate: Arc::new(crate::infer::gate::InferenceGate::new(
-                std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
-            )),
-            corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            used: working.used,
+            gate: working.shared.gate,
+            corpus_locks: working.corpus_locks,
+            lifecycle_lock: working.lifecycle_lock,
             appliers: builtin_appliers(),
-            decodes: Arc::new(tokio::sync::Semaphore::new(
-                crate::core::image::MAX_CONCURRENT_DECODES,
-            )),
+            decodes: working.shared.decodes,
         }
+    }
+
+    /// Someone searched or asked just now. Kept in memory because with `[learn]` off nothing
+    /// is recorded, and the idle passes would take a base in use for a sleeping one.
+    pub fn mark_used(&self) {
+        self.used
+            .store(crate::store::now(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn used_since(&self, since: i64) -> bool {
+        self.used.load(std::sync::atomic::Ordering::Relaxed) > since
     }
 
     /// Exclusive access to one document's artifact rows; segment writes and `finish` renumbering
@@ -779,7 +839,10 @@ pub mod test_support {
             },
             decide_cfg: crate::config::DecideConfig::default(),
             feedback: crate::config::FeedbackConfig::default(),
-            capture: crate::config::CaptureConfig::default(),
+            capture: crate::config::CaptureConfig {
+                fetch_private: Some(true),
+                ..Default::default()
+            },
             associate: crate::config::AssociateConfig::default(),
             activation: crate::config::ActivationConfig::default(),
             promote: crate::config::PromoteConfig::default(),
@@ -799,6 +862,7 @@ pub mod test_support {
             model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             trail_gen: Default::default(),
             sittings: Arc::new(Default::default()),
+            used: Arc::new(Default::default()),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::ZERO,
             )),
@@ -895,7 +959,7 @@ mod tests {
         let store = crate::store::Store::memory().await.unwrap();
         let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
-        let working = Working::default();
+        let working = Working::new(Shared::new(&cfg));
         let serving = Core::from_config_with(&cfg, vectors.clone(), store.clone(), working.clone());
         let passing = Core::from_config_with(&cfg, vectors, store, working);
         assert_eq!(serving.measured_line(), 0.0);

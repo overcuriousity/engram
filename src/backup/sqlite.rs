@@ -42,6 +42,40 @@ pub async fn vacuum_into(src: &Path, dst: &Path) -> Result<()> {
     copied.map(|_| ())
 }
 
+/// What SQLite itself finds wrong inside `db`; empty means sound. A checksum only says the
+/// bytes are the ones written, not that they were a database worth keeping.
+pub async fn unsound(db: &Path) -> Result<Vec<String>> {
+    use sqlx::Row;
+    let mut conn = open_read_only(db).await?;
+    let fail = |e: sqlx::Error| Error::Store(format!("{}: {e}", db.display()));
+    let mut found = Vec::new();
+    // runtime: a pragma, which the query macros do not check.
+    for row in sqlx::query("PRAGMA integrity_check")
+        .fetch_all(&mut conn)
+        .await
+        .map_err(fail)?
+    {
+        let line: String = row.try_get(0).map_err(fail)?;
+        if line != "ok" {
+            found.push(line);
+        }
+    }
+    // runtime: a pragma, as above.
+    for row in sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut conn)
+        .await
+        .map_err(fail)?
+    {
+        let (table, parent): (String, String) =
+            (row.try_get(0).map_err(fail)?, row.try_get(2).map_err(fail)?);
+        found.push(format!(
+            "a row in {table} points at a missing row in {parent}"
+        ));
+    }
+    let _ = conn.close().await;
+    Ok(found)
+}
+
 /// The same queries the store-drift heal reads, counted.
 pub async fn counts(db: &Path) -> Result<(u64, u64)> {
     let mut conn = open_read_only(db).await?;
@@ -113,18 +147,31 @@ pub fn stage(src: &Path, dst: &Path, sha256: &str) -> Result<()> {
     staged
 }
 
-/// The target's `-wal`/`-shm` go first, or SQLite replays a stale `-wal` into the new file.
+/// The target's `-wal`/`-shm` are out of the way first, or SQLite replays a stale `-wal` into
+/// the new file. Set aside, not deleted: a rename that fails must leave the old base its log.
 pub fn swap(staged: &Path, target: &Path) -> Result<()> {
+    let aside = |ext: &str| with_suffix(target, &format!("{ext}.replaced"));
     for ext in ["-wal", "-shm"] {
-        remove_if_present(&with_suffix(target, ext))?;
+        match std::fs::rename(with_suffix(target, ext), aside(ext)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(Error::Store(format!("{}{ext}: {e}", target.display())));
+            }
+            _ => {}
+        }
     }
-    std::fs::rename(staged, target).map_err(|e| {
-        Error::Store(format!(
+    if let Err(e) = std::fs::rename(staged, target) {
+        for ext in ["-wal", "-shm"] {
+            let _ = std::fs::rename(aside(ext), with_suffix(target, ext));
+        }
+        return Err(Error::Store(format!(
             "rename {} to {}: {e}",
             staged.display(),
             target.display()
-        ))
-    })?;
+        )));
+    }
+    for ext in ["-wal", "-shm"] {
+        remove_if_present(&aside(ext))?;
+    }
     if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::File::open(parent)
             .and_then(|d| d.sync_all())
@@ -140,6 +187,71 @@ pub(crate) mod tests {
     use crate::store::artifacts::NewArtifact;
     use crate::store::control::Control;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Leaves artifacts pointing at a corpus that is gone, as only a connection with foreign
+    /// keys off can.
+    pub(crate) async fn orphan(path: &Path) {
+        let mut raw = SqliteConnectOptions::new()
+            .filename(path)
+            .foreign_keys(false)
+            .connect()
+            .await
+            .unwrap();
+        // runtime: planted behind the store's back.
+        sqlx::query("DELETE FROM corpora")
+            .execute(&mut raw)
+            .await
+            .unwrap();
+        raw.close().await.unwrap();
+    }
+
+    #[test]
+    fn a_swap_that_fails_leaves_the_old_database_its_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("t.db");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(with_suffix(&target, "-wal"), b"commits not yet in the file").unwrap();
+
+        // Nothing was staged, so the rename cannot happen.
+        assert!(swap(&dir.path().join("never-staged.db"), &target).is_err());
+
+        let log = std::fs::read(with_suffix(&target, "-wal")).unwrap_or_default();
+        assert_eq!(
+            log, b"commits not yet in the file",
+            "the old base lost its last commits"
+        );
+    }
+
+    #[test]
+    fn a_swap_leaves_no_log_of_the_old_database_beside_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (staged, target) = (dir.path().join("s.db"), dir.path().join("t.db"));
+        std::fs::write(&staged, b"new").unwrap();
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(with_suffix(&target, "-wal"), b"stale").unwrap();
+
+        swap(&staged, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["t.db"], "{left:?}");
+    }
+
+    #[tokio::test]
+    async fn a_row_pointing_at_nothing_is_named_and_a_sound_base_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let _store = tenant_with_three(&path).await;
+        assert_eq!(unsound(&path).await.unwrap(), Vec::<String>::new());
+
+        orphan(&path).await;
+
+        let found = unsound(&path).await.unwrap();
+        assert!(found.iter().any(|p| p.contains("artifacts")), "{found:?}");
+    }
 
     pub(crate) async fn tenant_with_three(path: &Path) -> Store {
         let s = Store::connect(

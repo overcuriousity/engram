@@ -109,6 +109,12 @@ pub async fn undo(
         )));
     }
 
+    // In the Trash: its sources were freed when it went there. Deprecating it now would move
+    // it out of the Trash with `trashed_at` still set. A value, not `Err`, as below.
+    if m.status == crate::store::artifacts::ArtifactStatus::Trashed {
+        return Ok(Undone::InTrash);
+    }
+
     // A merge hidden behind a later one: `deprecate_with` refuses it and its roots now point at the
     // later merge. Report that nothing was done, not `Err`, which would wedge rule 1's idle pass.
     if let Some(later) = m.superseded_by.clone() {
@@ -120,11 +126,41 @@ pub async fn undo(
         return Ok(Undone::HiddenBehind { later });
     }
 
-    // Everything it hid, including a subsumed earlier merge.
-    let restored = core.store.artifacts_superseded_by(&m.id).await?;
+    // Everything it hid, including a subsumed earlier merge and what that one had hidden.
+    let hidden = core.store.artifacts_superseded_by(&m.id).await?;
+    // `finish` re-pointed an earlier merge's roots here. They go back behind that merge, not
+    // into results beside it.
+    let mut behind: Vec<(String, String)> = Vec::new();
+    for id in &hidden {
+        let Ok(older) = core.store.get_artifact(id).await else {
+            continue;
+        };
+        if older.provenance != Provenance::Merged {
+            continue;
+        }
+        for root in core.store.roots_to_hide(id).await? {
+            if hidden.contains(&root) && !behind.iter().any(|(r, _)| *r == root) {
+                behind.push((root, id.clone()));
+            }
+        }
+    }
+    let restored: Vec<String> = hidden
+        .into_iter()
+        .filter(|id| !behind.iter().any(|(root, _)| root == id))
+        .collect();
     for id in &restored {
         if let Err(e) = core.reactivate(id).await {
             tracing::warn!(artifact = %id, error = %e, "could not restore a merged artifact's source");
+        }
+    }
+    // After the earlier merge is back: a re-point wants an active winner.
+    for (root, older) in &behind {
+        if let Err(e) = core.repoint_supersession(root, older).await {
+            tracing::warn!(artifact = %root, to = %older, error = %e,
+                "could not put a root back behind the earlier merge; it stays restored");
+            if let Err(e) = core.reactivate(root).await {
+                tracing::warn!(artifact = %root, error = %e, "could not restore it either");
+            }
         }
     }
 
@@ -155,6 +191,8 @@ pub async fn undo(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Undone {
     TakenApart,
+    /// A person deleted it, which already freed its sources; there is nothing to take apart.
+    InTrash,
     /// A later merge subsumed this one; carries the merge standing in front of it.
     HiddenBehind {
         later: String,
@@ -737,6 +775,81 @@ mod tests {
                 "{id} points at a winner that is itself superseded"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn undoing_a_merge_of_a_merge_brings_back_the_earlier_merge_not_what_it_hid() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m1 = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &m1.id).await.unwrap();
+        let c =
+            crate::jobs::consolidate::tests::seed_into_new_corpus(&core, "c text", [0.94, 0.34])
+                .await;
+        let m2 = write(
+            &core,
+            &draft("a text and b text and c text"),
+            &[m1.id.clone(), c.clone()],
+        )
+        .await
+        .unwrap();
+        crate::jobs::embed::run(&core, &m2.id).await.unwrap();
+
+        let out = undo(&core, &m2.id, crate::store::pairs::DecidedBy::Operator)
+            .await
+            .unwrap();
+        assert_eq!(out, Undone::TakenApart);
+
+        let get = |id: String| {
+            let core = core.clone();
+            async move { core.store.get_artifact(&id).await.unwrap() }
+        };
+        assert!(
+            get(m1.id.clone()).await.in_results(),
+            "the earlier merge is not back"
+        );
+        assert!(get(c.clone()).await.in_results());
+        for root in &ids {
+            assert_eq!(
+                get(root.clone()).await.superseded_by.as_deref(),
+                Some(m1.id.as_str()),
+                "{root} is in results beside the merge that was written from it"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_merge_in_the_trash_is_not_taken_apart() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &m.id).await.unwrap();
+        core.trash_artifact(&m.id).await.unwrap();
+
+        let out = undo(&core, &m.id, crate::store::pairs::DecidedBy::Evidence)
+            .await
+            .unwrap();
+
+        assert_eq!(out, Undone::InTrash);
+        assert!(!out.happened());
+        let now = core.store.get_artifact(&m.id).await.unwrap();
+        assert_eq!(
+            now.status,
+            crate::store::artifacts::ArtifactStatus::Trashed,
+            "the merge left the Trash by the back door"
+        );
     }
 
     #[tokio::test]

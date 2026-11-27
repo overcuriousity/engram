@@ -44,6 +44,8 @@ sha2 = "0.11"
 hex = "0.4"
 anyhow = "1"
 async-trait = "0.1.92"
+# `catch_unwind` over a future: a panicking job must not take its worker with it.
+futures-util = { version = "0.3.33", default-features = false, features = ["std"] }
 # One ask is a sequence of events, written as straight-line async code.
 async-stream = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -92,7 +94,8 @@ schemars = "1.2.2"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 # EXIF carries when and where a photo was taken.
 kamadak-exif = "0.6.1"
-# Local time, applied only at the edge; storage stays Unix seconds.
+# Local time, applied only at the edge; storage stays Unix seconds. Flagged unmaintained
+# (RUSTSEC-2026-0543, chrono-tz -0555), no upstream fix: `cargo deny` is left failing on them.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 # The zone comes from the device, and a stored offset cannot cross a DST boundary.
 iana-time-zone = "0.1"

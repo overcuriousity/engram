@@ -167,6 +167,17 @@
             "name": "net"
           }
         }
+      },
+      {
+        "name": "moved_at",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_pairs",
+            "name": "moved_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -186,6 +197,7 @@
       true,
       true,
       false,
+      true,
       true,
       true
     ]

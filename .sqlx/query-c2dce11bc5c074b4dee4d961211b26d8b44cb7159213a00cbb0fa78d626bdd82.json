@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT p.id AS \"id!\", p.a_id, p.b_id, p.score, p.state, p.detail, p.created_at,\n                      p.judge_attempts, p.judge_unreadable, p.obsolete_id, p.merged_into,\n                      p.decided_by, p.synthesis_asked, p.synthesis_by, p.net\n                 FROM artifact_pairs p\n                 JOIN artifacts a ON a.id = p.a_id\n                 JOIN artifacts b ON b.id = p.b_id\n                WHERE p.state = 'pending' AND p.synthesis_asked = 0\n                  AND NOT EXISTS (\n                      SELECT 1 FROM decisions d\n                       WHERE d.question_id = 'pair_relation' AND d.subject_kind = 'pair'\n                         AND d.subject_a = CAST(p.id AS TEXT) AND d.era = ?\n                         AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev\n                         AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')\n                ORDER BY (COALESCE(p.net = 'decide', 0) AND p.judge_attempts = 0) DESC,\n                         (p.score = 0 AND p.judge_attempts = 0) DESC,\n                         p.judge_attempts ASC, p.score DESC, p.created_at DESC LIMIT ?",
+  "query": "SELECT p.id AS \"id!\", p.a_id, p.b_id, p.score, p.state, p.detail, p.created_at,\n                      p.judge_attempts, p.judge_unreadable, p.obsolete_id, p.merged_into,\n                      p.decided_by, p.synthesis_asked, p.synthesis_by, p.net, p.moved_at\n                 FROM artifact_pairs p\n                 JOIN artifacts a ON a.id = p.a_id\n                 JOIN artifacts b ON b.id = p.b_id\n                WHERE p.state = 'pending' AND p.synthesis_asked = 0\n                  AND NOT EXISTS (\n                      SELECT 1 FROM decisions d\n                       WHERE d.question_id = 'pair_relation' AND d.subject_kind = 'pair'\n                         AND d.subject_a = CAST(p.id AS TEXT) AND d.era = ?\n                         AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev\n                         AND d.decided_at > COALESCE(p.moved_at, 0)\n                         AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')\n                ORDER BY (COALESCE(p.net = 'decide', 0) AND p.judge_attempts = 0) DESC,\n                         (p.score = 0 AND p.judge_attempts = 0) DESC,\n                         p.judge_attempts ASC, p.score DESC, p.created_at DESC LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -167,6 +167,17 @@
             "name": "net"
           }
         }
+      },
+      {
+        "name": "moved_at",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_pairs",
+            "name": "moved_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -187,8 +198,9 @@
       true,
       false,
       true,
+      true,
       true
     ]
   },
-  "hash": "4ec57df8a5e050911796fed37232d65544d042bbccc3c05aba5652411cacfe50"
+  "hash": "c2dce11bc5c074b4dee4d961211b26d8b44cb7159213a00cbb0fa78d626bdd82"
 }

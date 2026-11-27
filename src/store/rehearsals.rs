@@ -527,6 +527,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_edit_retires_the_probes_written_for_the_old_wording() {
+        let store = Store::memory().await.unwrap();
+        let (edited, other) = (owner(&store).await, owner(&store).await);
+        for o in [&edited, &other] {
+            store
+                .record_rehearsal(&probe(o, &format!("why won't {o} mount")))
+                .await
+                .unwrap();
+        }
+
+        store
+            .update_artifact_text(&edited, "something else entirely")
+            .await
+            .unwrap();
+
+        assert!(
+            store.rehearsals_of(&edited).await.unwrap().is_empty(),
+            "probes for wording that is gone go on being scored against the new text"
+        );
+        assert_eq!(store.rehearsals_of(&other).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_retired_probe_does_not_block_the_same_question_being_asked_again() {
         let store = Store::memory().await.unwrap();
         let o = owner(&store).await;

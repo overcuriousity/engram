@@ -37,3 +37,22 @@ impl axum::extract::OptionalFromRequestParts<AppState> for Tenant {
         }
     }
 }
+
+/// A guard for the routes that hand out or bring back a credential: a browser session, not
+/// a bearer. A leaked token would otherwise mint a successor that outlives its own revocation.
+pub struct InBrowser;
+
+impl FromRequestParts<AppState> for InBrowser {
+    type Rejection = Error;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let id = Identity::from_request_parts(parts, state).await?;
+        match id.session {
+            Some(_) => Ok(InBrowser),
+            None => Err(Error::Forbidden),
+        }
+    }
+}

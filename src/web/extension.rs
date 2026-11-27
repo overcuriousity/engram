@@ -38,8 +38,13 @@ async fn install_page(_tenant: Tenant, State(st): State<AppState>) -> Response {
     .into_response()
 }
 
-/// One token per device, named and revocable on its own; the plaintext shows once (the store keeps its argon2id hash).
-async fn phone_token(tenant: Tenant, State(st): State<AppState>, headers: HeaderMap) -> Response {
+/// One token per device, named and revocable on its own; the plaintext shows once (the store keeps only its hash).
+async fn phone_token(
+    _here: crate::web::tenant::InBrowser,
+    tenant: Tenant,
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     let minted = crate::auth::tokens::mint(
         &tenant.core.store.control,
         "phone",

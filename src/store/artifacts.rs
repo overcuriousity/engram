@@ -561,6 +561,50 @@ impl Store {
         provenance: Provenance,
     ) -> Result<Vec<Chunk>> {
         let mut tx = self.pool.begin().await?;
+        let out = insert_into(&mut tx, corpus_id, chunks, provenance).await?;
+        tx.commit().await?;
+        Ok(out)
+    }
+
+    /// One transaction: a split that fails half-way must leave the parent alone, or its retry
+    /// splits the parent again and the text is in the base twice.
+    pub async fn replace_with_siblings(
+        &self,
+        corpus_id: &str,
+        parent: &str,
+        ordinal: i64,
+        parts: &[NewArtifact],
+    ) -> Result<Vec<Chunk>> {
+        let mut tx = self.pool.begin().await?;
+        // Make room first: `base * 1000 + i` sorts siblings after later chunks.
+        let by = parts.len() as i64 - 1;
+        sqlx::query!(
+            "UPDATE artifacts SET ordinal = ordinal + ? WHERE corpus_id = ? AND ordinal > ?",
+            by,
+            corpus_id,
+            ordinal
+        )
+        .execute(&mut *tx)
+        .await?;
+        let inserted = insert_into(&mut tx, corpus_id, parts, Provenance::Captured).await?;
+        let gone = sqlx::query!("DELETE FROM artifacts WHERE id = ?", parent)
+            .execute(&mut *tx)
+            .await?;
+        if gone.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        tx.commit().await?;
+        Ok(inserted)
+    }
+}
+
+async fn insert_into(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    corpus_id: &str,
+    chunks: &[NewArtifact],
+    provenance: Provenance,
+) -> Result<Vec<Chunk>> {
+    {
         let mut out = Vec::with_capacity(chunks.len());
         for nc in chunks {
             let created_at = now();
@@ -610,14 +654,15 @@ impl Store {
                 c.last_verified_at,
                 c.created_at
             )
-                .execute(&mut *tx)
+                .execute(&mut **tx)
             .await?;
             out.push(c);
         }
-        tx.commit().await?;
         Ok(out)
     }
+}
 
+impl Store {
     pub async fn get_artifact(&self, id: &str) -> Result<Chunk> {
         let row = sqlx::query_as!(
             crate::store::artifacts::ArtifactRow,
@@ -817,6 +862,8 @@ impl Store {
         terms: &[String],
         unembedded_only: bool,
         limit: usize,
+        category: Option<&str>,
+        tags: &[String],
     ) -> Result<Vec<Chunk>> {
         if terms.is_empty() || limit == 0 {
             return Ok(Vec::new());
@@ -833,9 +880,16 @@ impl Store {
                 " AND (text LIKE ? ESCAPE '\\' OR COALESCE(title, '') LIKE ? ESCAPE '\\')",
             );
         }
+        // In the statement, not after it: a limit taken first is spent on rows outside the filter.
+        if category.is_some() {
+            sql.push_str(" AND category = ?");
+        }
+        for _ in tags {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM json_each(artifacts.tags) WHERE value = ?)");
+        }
         sql.push_str(" ORDER BY created_at DESC, id LIMIT ?");
-        // Only a fixed clause repeated per term is interpolated; every value is bound.
-        // runtime: one LIKE clause per search term.
+        // Only fixed clauses repeated per term and per tag are interpolated; every value is bound.
+        // runtime: one LIKE clause per search term, one EXISTS per tag.
         let mut q = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(sql));
         for t in terms {
             let escaped = t
@@ -844,6 +898,12 @@ impl Store {
                 .replace('_', "\\_");
             let pattern = format!("%{escaped}%");
             q = q.bind(pattern.clone()).bind(pattern);
+        }
+        if let Some(c) = category {
+            q = q.bind(c);
+        }
+        for t in tags {
+            q = q.bind(t);
         }
         let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(row_to_artifact).collect())
@@ -959,20 +1019,32 @@ impl Store {
         )
     }
 
+    /// A person's edit. The probes rehearsed on the old wording go with it: scored against the
+    /// new text they would read as the note having got worse.
     pub async fn update_artifact_text(&self, id: &str, text: &str) -> Result<()> {
-        self.expect_updated(
-            sqlx::query!(
-                "UPDATE artifacts
-                 SET text = ?, embed_state = 'pending', embed_model = NULL,
-                     embed_rev = embed_rev + 1, updated_at = ?
-                 WHERE id = ?",
-                text,
-                super::now(),
-                id
-            )
-            .execute(&self.pool)
-            .await?,
+        let at = super::now();
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query!(
+            "UPDATE artifacts
+             SET text = ?, embed_state = 'pending', embed_model = NULL,
+                 embed_rev = embed_rev + 1, updated_at = ?
+             WHERE id = ?",
+            text,
+            at,
+            id
         )
+        .execute(&mut *tx)
+        .await?;
+        self.expect_updated(res)?;
+        sqlx::query!(
+            "UPDATE rehearsals SET retired_at = ? WHERE artifact_id = ? AND retired_at IS NULL",
+            at,
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// The caller queues the embed, as with `update_artifact_text`.
@@ -1052,19 +1124,6 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(|r| r.id).collect())
-    }
-
-    /// Chunks inserted into the gap keep reading order without renumbering the source.
-    pub async fn make_room_after(&self, corpus_id: &str, ordinal: i64, by: i64) -> Result<()> {
-        sqlx::query!(
-            "UPDATE artifacts SET ordinal = ordinal + ? WHERE corpus_id = ? AND ordinal > ?",
-            by,
-            corpus_id,
-            ordinal
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     /// Ordering by window, then by within-window number, reproduces reading order.
@@ -1687,7 +1746,8 @@ impl Store {
     /// One transaction; the grave row goes only where the artifact was restored.
     /// `lifecycle_dirty` is cleared: there is no point to write a payload onto until the embed.
     pub async fn exhume(&self, id: &str) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        // Immediate: it reads the grave before it writes (see `mint_trail`).
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let Some(row) = sqlx::query!("SELECT text FROM graveyard WHERE id = ?", id)
             .fetch_optional(&mut *tx)
             .await?
@@ -1814,6 +1874,94 @@ mod tests {
             tags: vec!["forensics".into(), "windows".into()],
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_keyword_match_inside_the_filter_is_not_crowded_out_by_ones_outside_it() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let wanted = s
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    tags: vec!["keep".into()],
+                    category: Some("reference".into()),
+                    ..nc(0, "mount the image read-only")
+                }],
+            )
+            .await
+            .unwrap();
+        // Newer, matching, and outside the filter: more of them than the limit.
+        let later: Vec<NewArtifact> = (1..6).map(|i| nc(i, "mount something else")).collect();
+        s.insert_artifacts(&src.id, &later).await.unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = created_at - 100 WHERE id = ?",
+            wanted[0].id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        let terms = ["mount".to_string()];
+        let by_tag = s
+            .keyword_matches(&terms, false, 2, None, &["keep".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            by_tag.len(),
+            1,
+            "the limit was spent before the filter was asked"
+        );
+        assert_eq!(by_tag[0].id, wanted[0].id);
+        let by_category = s
+            .keyword_matches(&terms, false, 2, Some("reference"), &[])
+            .await
+            .unwrap();
+        assert_eq!(by_category.len(), 1);
+        assert_eq!(
+            s.keyword_matches(&terms, false, 2, None, &[])
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_split_that_cannot_remove_its_parent_leaves_no_siblings_behind() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "one"), nc(1, "two")])
+            .await
+            .unwrap();
+
+        // The parent is gone by the time the split lands (a retry after a half-done split).
+        let lost = s
+            .replace_with_siblings(&src.id, "no-such-parent", 0, &[nc(0, "o"), nc(1, "ne")])
+            .await;
+        assert!(matches!(lost, Err(Error::NotFound)));
+        let left = s.artifacts_for_corpus(&src.id).await.unwrap();
+        let texts: Vec<&str> = left.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["one", "two"], "the text is in the base twice");
+        assert_eq!(
+            left[1].ordinal, 1,
+            "room was made for siblings that never came"
+        );
+
+        let kept = s
+            .replace_with_siblings(&src.id, &made[0].id, 0, &[nc(0, "o"), nc(1, "ne")])
+            .await
+            .unwrap();
+        assert_eq!(kept.len(), 2);
+        let now: Vec<String> = s
+            .artifacts_for_corpus(&src.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert_eq!(now, ["o", "ne", "two"]);
     }
 
     #[tokio::test]

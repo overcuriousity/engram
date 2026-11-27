@@ -187,6 +187,13 @@ pub async fn preflight(
         Skew::OtherBuild(w) => warnings.push(w),
         _ => {}
     }
+    // The control database is replaced whole, so a tenant the archive lacks keeps its live base.
+    if !m.skipped.is_empty() {
+        warnings.push(format!(
+            "partial archive: {} not archived; their bases stay as they are",
+            m.skipped.join(", ")
+        ));
+    }
 
     if m.vector_backend != backend {
         return Err(Refusal::BackendMismatch {
@@ -726,6 +733,27 @@ pub(crate) mod tests {
             panic!("not reported");
         };
         assert!(w.contains("0.1.0+bbb") && w.contains("0.1.0+aaa"), "{w}");
+    }
+
+    #[tokio::test]
+    async fn a_partial_archive_says_whose_base_it_does_not_hold() {
+        let base = backed_up().await;
+        edit_manifest(&base, |v| {
+            v["skipped"] = serde_json::json!(["0123456789abcdef"])
+        });
+        let plan = preflight(
+            &base.cfg,
+            &base.archive,
+            &RestoreOpts::default(),
+            Backend::Qdrant,
+        )
+        .await
+        .unwrap();
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("0123456789abcdef")),
+            "the control database is replaced and nothing says a tenant was left out: {:?}",
+            plan.warnings
+        );
     }
 
     #[tokio::test]

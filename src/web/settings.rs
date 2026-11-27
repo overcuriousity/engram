@@ -129,10 +129,8 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Re
             .as_str()
             .unwrap_or_default()
             .to_string(),
-        up_device: notify["unifiedpush"]["device"]
-            .as_str()
-            .filter(|d| !d.is_empty())
-            .map(str::to_string),
+        up_device: Some(crate::jobs::remind::device_names(&notify).join(", "))
+            .filter(|d| !d.is_empty()),
         up_legacy: crate::jobs::remind::notify_targets(&notify)
             .iter()
             .any(|t| {
@@ -322,10 +320,8 @@ pub(crate) async fn notify_setting(tenant: &Tenant) -> Result<NotifySetting> {
             .as_str()
             .unwrap_or_default()
             .to_string(),
-        up_device: notify["unifiedpush"]["device"]
-            .as_str()
-            .filter(|d| !d.is_empty())
-            .map(str::to_string),
+        up_device: Some(crate::jobs::remind::device_names(&notify).join(", "))
+            .filter(|d| !d.is_empty()),
         up_legacy: crate::jobs::remind::notify_targets(&notify)
             .iter()
             .any(|t| {
@@ -366,6 +362,10 @@ pub(crate) async fn set_notify(
             true => stored["unifiedpush"].clone(),
             false => serde_json::json!({ "endpoint": endpoint }),
         };
+    }
+    // The form knows nothing of the devices that registered themselves; they stay.
+    if let Some(devices) = stored.get("devices") {
+        notify["devices"] = devices.clone();
     }
     control.set_notify(&tenant.user.subject, &notify).await?;
     tenant.core.store.rearm_remind().await?;
@@ -435,6 +435,7 @@ async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<
 }
 
 async fn mint_token(
+    _here: crate::web::tenant::InBrowser,
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Form(f): Form<MintForm>,
@@ -486,7 +487,11 @@ async fn revoke_token_ui(tenant: Tenant, Path(tid): Path<String>) -> UiResult<Re
     Ok(axum::response::Html(format!("{}{notice}", render_row(row)?)).into_response())
 }
 
-async fn restore_token_ui(tenant: Tenant, Path(tid): Path<String>) -> UiResult<Response> {
+async fn restore_token_ui(
+    _here: crate::web::tenant::InBrowser,
+    tenant: Tenant,
+    Path(tid): Path<String>,
+) -> UiResult<Response> {
     crate::auth::tokens::restore(&tenant.core.store.control, &tid, &tenant.user.subject).await?;
     Ok((
         [("hx-refresh", "true")],
@@ -518,6 +523,50 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn a_token_cannot_make_or_bring_back_another_credential() {
+        let core = crate::core::test_support::test_core().await;
+        let (spare, _) = crate::auth::tokens::mint(&core.store.control, "spare", "user-1", None)
+            .await
+            .unwrap();
+        let spare_id = spare.id;
+        crate::auth::tokens::revoke(&core.store.control, &spare_id, "user-1")
+            .await
+            .unwrap();
+        let (app, token) = crate::web::test_support::app_with_token(core.clone()).await;
+        let restore = format!("/ui/ops/tokens/{spare_id}/restore");
+        let pair = "redirect_uri=https%3A%2F%2Fabc.chromiumapp.org%2F&state=s";
+        for (uri, body) in [
+            ("/ui/ops/tokens", "name=more"),
+            ("/extension/phone", ""),
+            ("/ui/app/grant", ""),
+            ("/ui/pair", pair),
+            (restore.as_str(), ""),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+        let left = core.store.control.list_tokens("user-1").await.unwrap();
+        assert_eq!(left.len(), 2, "a leaked token minted itself a successor");
+        assert!(
+            left.iter()
+                .any(|t| t.id == spare_id && t.revoked_at.is_some()),
+            "a leaked token brought a revoked one back"
+        );
+    }
 
     fn settings_fixture(tokens: Vec<TokenRow>) -> String {
         askama::Template::render(&SettingsTemplate {

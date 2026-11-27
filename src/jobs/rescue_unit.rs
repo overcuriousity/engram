@@ -134,6 +134,16 @@ async fn refused(core: &Core, c: &Chunk) -> Result<bool> {
 }
 
 async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
+    // A rewrite stored by an attempt that failed afterwards is the rewrite: writing another
+    // leaves two for one note.
+    let made = match core.store.rescue_of(&c.id, CUE).await? {
+        Some(stored) => stored,
+        None => write_rescue(core, c).await?,
+    };
+    stand_in(core, c, made).await
+}
+
+async fn write_rescue(core: &Core, c: &Chunk) -> Result<String> {
     // `core.generator`: `RESCUE_SYSTEM` needs `for_generating`'s response format.
     let writer = core
         .generator
@@ -232,8 +242,13 @@ async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
             std::slice::from_ref(&c.id),
         )
         .await?;
+    Ok(made.id)
+}
+
+/// Embeds the rewrite and puts it in the note's place; safe to run again.
+async fn stand_in(core: &Core, c: &Chunk, made: String) -> Result<String> {
     core.store
-        .enqueue(crate::store::jobs::Stage::Embed, "artifact", &made.id)
+        .rearm_idle_seq(crate::store::jobs::Stage::Embed, "artifact", &made, 0)
         .await?;
     // Through the store, not `core.supersede()`, whose both-active guard refuses a retired loser.
     // Re-checked like `bury`: the row may have been reactivated during the model call.
@@ -241,7 +256,7 @@ async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
         let _guard = core.lifecycle_lock.lock().await;
         match core
             .store
-            .supersede_if_reapable(&c.id, &made.id, min_age_secs(core))
+            .supersede_if_reapable(&c.id, &made, min_age_secs(core))
             .await
         {
             Ok(()) => {
@@ -249,7 +264,7 @@ async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
                     .set_lifecycle(
                         &c.id,
                         crate::store::artifacts::ArtifactStatus::Superseded,
-                        Some(&made.id),
+                        Some(&made),
                     )
                     .await?;
                 core.store
@@ -259,18 +274,18 @@ async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
             Err(Error::NotFound) => {
                 tracing::info!(
                     artifact_id = %c.id,
-                    new_id = %made.id,
+                    new_id = %made,
                     "the candidate stopped being one while it was being rewritten; \
                      the rewrite stands and the row is left alone"
                 );
-                return Ok(made.id);
+                return Ok(made);
             }
             Err(e) => return Err(e),
         }
     }
     // Restamped on both branches, so the second visit is an age later, against the rewrite.
     core.store.restamp_retired(&c.id).await?;
-    Ok(made.id)
+    Ok(made)
 }
 
 #[cfg(test)]
@@ -398,6 +413,56 @@ mod tests {
             roots, want,
             "the rewrite's lineage names the captured roots"
         );
+    }
+
+    #[tokio::test]
+    async fn a_rescue_retried_after_its_rewrite_was_stored_does_not_write_a_second() {
+        let mut core = test_core().await;
+        scripted(&mut core, &[SURE_YES, SURE_YES]);
+        writing(&mut core, &[RESCUE_REPLY, RESCUE_REPLY]);
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        let first = crate::jobs::reap::run(&core).await.unwrap();
+        assert_eq!(first.rescued, 1);
+        // The first attempt got as far as storing the rewrite, then a store call failed.
+        let stored = core
+            .store
+            .insert_synthesized_artifact(
+                &crate::store::artifacts::NewSynthesized {
+                    text: "the port is 8443".into(),
+                    title: Some("Admin port".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![CUE.into()],
+                },
+                std::slice::from_ref(&ids[0]),
+            )
+            .await
+            .unwrap();
+
+        run(&core, &ids[0]).await.unwrap();
+
+        let winner = core
+            .store
+            .get_artifact(&ids[0])
+            .await
+            .unwrap()
+            .superseded_by;
+        assert_eq!(
+            winner.as_deref(),
+            Some(stored.id.as_str()),
+            "a second rewrite was written"
+        );
+        let rewrites = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM artifact_sources WHERE root_id = ?",
+            &ids[0]
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(rewrites, 1);
     }
 
     #[tokio::test]

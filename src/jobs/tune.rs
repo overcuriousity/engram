@@ -108,10 +108,8 @@ async fn journal(core: &Core, started: i64, p: &Pass) -> Result<()> {
 }
 
 async fn quiet(core: &Core) -> Result<bool> {
-    Ok(!core
-        .store
-        .activity_since(crate::store::now() - core.evolve.idle_secs.max(0))
-        .await?)
+    let idle = crate::store::now() - core.evolve.idle_secs.max(0);
+    Ok(!(core.used_since(idle) || core.store.activity_since(idle).await?))
 }
 
 pub async fn pass(core: &Core) -> Result<Pass> {
@@ -992,6 +990,15 @@ mod tests {
     use super::*;
     use crate::eval::sweep::test_support::{QUERY, seeded};
     use crate::store::observations::{NewObservation, Source};
+
+    #[tokio::test]
+    async fn a_base_in_use_is_not_quiet_even_where_nothing_is_recorded() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = false;
+        assert!(quiet(&core).await.unwrap());
+        core.mark_used();
+        assert!(!quiet(&core).await.unwrap());
+    }
 
     async fn generation_for(core: &Core) -> String {
         let params = *core

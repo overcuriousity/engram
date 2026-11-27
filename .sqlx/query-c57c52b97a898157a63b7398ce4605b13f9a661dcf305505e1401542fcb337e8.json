@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments SET artifact_id = ?\n              WHERE artifact_id = ?\n                AND id IN (SELECT moment_id FROM moment_carries\n                            WHERE to_id = ? AND from_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "c57c52b97a898157a63b7398ce4605b13f9a661dcf305505e1401542fcb337e8"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT claimed_at FROM jobs WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "claimed_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "claimed_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5886a1c4a1b87be696d65eaf608e39bc795da71a9c29a978a185e6a6e8777bbb"
+}

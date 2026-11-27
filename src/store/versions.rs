@@ -51,6 +51,8 @@ impl Store {
         .await?;
         if let Some(obj) = evidence.as_object_mut() {
             obj.insert("version".into(), serde_json::json!(n));
+            // The revision this write leaves: a later one means somebody edited the text since.
+            obj.insert("rev".into(), serde_json::json!(row.embed_rev + 1));
         }
         let action_id = super::actions::insert(
             &mut *tx,

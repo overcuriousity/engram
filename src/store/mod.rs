@@ -47,7 +47,9 @@ pub struct Store {
     pub subject: String,
 }
 
-/// Retires journal entries back to ordinary captures. Idempotent, so it runs on every connect;
+const JOURNAL_RETIRED: &str = "journal.retired";
+
+/// Retires journal entries back to ordinary captures, once per base (`JOURNAL_RETIRED`);
 /// `json_valid` guards rows whose metadata is not JSON.
 const RETIRE_JOURNAL: &str = "
 UPDATE corpora
@@ -89,6 +91,27 @@ impl Store {
         Ok(store)
     }
 
+    /// As `Control::open_read_only`: a tenant's base opened to be looked at, never migrated.
+    pub async fn open_read_only(
+        path: &str,
+        control: control::Control,
+        subject: &str,
+    ) -> Result<Store> {
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?
+            .read_only(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts)
+            .await?;
+        Ok(Store {
+            pool,
+            control,
+            subject: subject.to_string(),
+        })
+    }
+
     pub fn for_subject(&self, subject: &str) -> Store {
         Store {
             subject: subject.to_string(),
@@ -104,7 +127,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 36] = [
+        const ADDITIVE: [(&str, &str, &str); 37] = [
             (
                 "artifacts",
                 "trashed_at",
@@ -258,6 +281,12 @@ impl Store {
                 "net",
                 "ALTER TABLE artifact_pairs ADD COLUMN net TEXT",
             ),
+            // NULL: a pair that never moved; every decision about it still stands.
+            (
+                "artifact_pairs",
+                "moved_at",
+                "ALTER TABLE artifact_pairs ADD COLUMN moved_at INTEGER",
+            ),
             // NULL: a decision from before counts toward no tuned line, like a new era.
             (
                 "decide_events",
@@ -333,10 +362,14 @@ impl Store {
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
 
-        sqlx::raw_sql(RETIRE_JOURNAL)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        // Once per base: four scans of `corpora` are not something every open should pay.
+        if self.meta_get(JOURNAL_RETIRED).await?.is_none() {
+            sqlx::raw_sql(RETIRE_JOURNAL)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+            self.meta_set(JOURNAL_RETIRED, "1").await?;
+        }
 
         Ok(())
     }
@@ -964,8 +997,18 @@ mod tests {
         .await
         .unwrap();
 
+        // A base from before: this build has not been over it yet.
+        sqlx::query!("DELETE FROM meta WHERE key = 'journal.retired'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         store.migrate().await.unwrap();
+        assert_eq!(
+            store.meta_get("journal.retired").await.unwrap().as_deref(),
+            Some("1"),
+            "every open scans the captures four times over"
+        );
 
         let c = store.get_corpus(&filed.id).await.unwrap();
         assert_eq!(c.origin, "cli");

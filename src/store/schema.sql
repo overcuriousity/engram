@@ -333,6 +333,9 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- queued it). NULL: containment or one shared document at the review line,
   -- or a link.
   net            TEXT,
+  -- When a pending row's members were last rewritten (a merge, a supersession).
+  -- A decision logged before it was made about other notes and no longer counts.
+  moved_at       INTEGER,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);
@@ -935,6 +938,16 @@ CREATE TABLE IF NOT EXISTS moments (
 CREATE INDEX IF NOT EXISTS idx_moments_open     ON moments(kind, done_at, at);
 CREATE INDEX IF NOT EXISTS idx_moments_artifact ON moments(artifact_id);
 CREATE INDEX IF NOT EXISTS idx_moments_series   ON moments(series_id);
+
+-- Each time an open moment was carried off a note that a merge or a replacement
+-- hid, so undoing that step puts it back where it was.
+CREATE TABLE IF NOT EXISTS moment_carries (
+  moment_id TEXT NOT NULL REFERENCES moments(id) ON DELETE CASCADE,
+  from_id   TEXT NOT NULL,
+  to_id     TEXT NOT NULL,
+  at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_moment_carries_step ON moment_carries(to_id, from_id);
 
 -- Where a reaped artifact's text goes. Never read by search, FTS, or the
 -- embedder; permanent by design — its purpose is that no reap verdict is

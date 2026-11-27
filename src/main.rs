@@ -396,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(dir) = &args.backup_check {
-        match engram::backup::take::check(dir) {
+        match engram::backup::take::check_sound(dir).await {
             Ok(m) => {
                 println!(
                     "{} intact: control database and {} tenants{}",
@@ -640,6 +640,7 @@ async fn main() -> anyhow::Result<()> {
         decide_handoff: Default::default(),
     };
 
+    engram::jobs::reclaim_orphans(&tenants).await;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     // Sweeps re-arm themselves in the queue; repair recovers that schedule, so it stays outside.
     let repair =
@@ -668,12 +669,12 @@ async fn main() -> anyhow::Result<()> {
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
+        engram::web::shutdown_signal().await;
         tracing::info!("shutting down");
     })
     .await?;
 
-    // Let in-flight jobs finish rather than orphaning `running` rows.
+    // Each worker finishes the unit it holds; one killed first is taken back at the next start.
     let _ = shutdown_tx.send(true);
     for h in handles {
         let _ = h.await;

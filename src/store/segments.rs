@@ -278,6 +278,17 @@ impl Store {
     }
 
     /// Resolved counts both clean and given-up windows.
+    /// A window the model refused: a hole in the document that clean chunks do not fill.
+    pub async fn has_failed_segment(&self, corpus_id: &str) -> Result<bool> {
+        let n = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM segments WHERE corpus_id = ? AND state = 'failed'",
+            corpus_id
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     pub async fn segment_progress(&self, corpus_id: &str) -> Result<(i64, i64)> {
         let row = sqlx::query!(
             "SELECT COUNT(*) AS total,

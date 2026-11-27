@@ -16,6 +16,8 @@ const MAX_TRACKED: usize = 10_000;
 pub struct Buckets {
     per_second: f64,
     burst: f64,
+    /// One bucket for every client together, where spreading over addresses must not help.
+    shared: bool,
     state: Arc<Mutex<HashMap<IpAddr, (f64, Instant)>>>,
 }
 
@@ -41,7 +43,12 @@ impl Buckets {
                 map.clear();
             }
         }
-        let (tokens, last) = map.entry(bucket_key(ip)).or_insert((self.burst, now));
+        let key = if self.shared {
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        } else {
+            bucket_key(ip)
+        };
+        let (tokens, last) = map.entry(key).or_insert((self.burst, now));
         *tokens =
             (*tokens + now.duration_since(*last).as_secs_f64() * self.per_second).min(self.burst);
         *last = now;
@@ -82,9 +89,19 @@ pub type RateLayer = FromFnLayer<
 
 /// A per-client token bucket: `per_minute` sustained, `burst` at once.
 pub fn rate_limit(per_minute: u32, burst: u32) -> RateLayer {
+    layer(per_minute, burst, false)
+}
+
+/// The same bucket for every client: a ceiling on the route, whoever asks.
+pub fn rate_limit_all(per_minute: u32, burst: u32) -> RateLayer {
+    layer(per_minute, burst, true)
+}
+
+fn layer(per_minute: u32, burst: u32, shared: bool) -> RateLayer {
     let b = Buckets {
         per_second: f64::from(per_minute) / 60.0,
         burst: f64::from(burst),
+        shared,
         state: Arc::default(),
     };
     from_fn_with_state(b, |s, r, n| Box::pin(limit(s, r, n)))

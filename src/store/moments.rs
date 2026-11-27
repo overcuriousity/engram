@@ -351,6 +351,27 @@ impl Store {
         if loser == winner {
             return Ok(0);
         }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // The step is written down first, by the same test the move uses: `return_moments`
+        // reads it to undo exactly this.
+        sqlx::query!(
+            "INSERT INTO moment_carries (moment_id, from_id, to_id, at)
+             SELECT m.id, ?, ?, ? FROM moments m
+              WHERE m.artifact_id = ? AND m.done_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM moments w
+                                 WHERE w.artifact_id = ?
+                                   AND w.kind = m.kind
+                                   AND w.at IS m.at
+                                   AND w.rule IS m.rule
+                                   AND w.done_at IS NULL)",
+            loser,
+            winner,
+            super::now(),
+            loser,
+            winner
+        )
+        .execute(&mut *tx)
+        .await?;
         let res = sqlx::query!(
             "UPDATE moments SET artifact_id = ?
               WHERE artifact_id = ? AND done_at IS NULL
@@ -364,8 +385,36 @@ impl Store {
             loser,
             winner
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Undoes one `carry_moments(loser, winner)`: what it moved goes back, done or not, and
+    /// the winner's own rows stay. A row that has since moved on is left where it is.
+    pub async fn return_moments(&self, winner: &str, loser: &str) -> Result<u64> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let res = sqlx::query!(
+            "UPDATE moments SET artifact_id = ?
+              WHERE artifact_id = ?
+                AND id IN (SELECT moment_id FROM moment_carries
+                            WHERE to_id = ? AND from_id = ?)",
+            loser,
+            winner,
+            winner,
+            loser
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "DELETE FROM moment_carries WHERE to_id = ? AND from_id = ?",
+            winner,
+            loser
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(res.rows_affected())
     }
 
@@ -1182,6 +1231,68 @@ mod tests {
                 .await
                 .unwrap(),
             "three occurrences is three, wherever the rows ended up"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_carried_reminder_goes_back_when_what_carried_it_is_undone() {
+        let (s, aid) = store_with_artifact().await;
+        let first = other_artifact(&s, "the first merge").await;
+        let second = other_artifact(&s, "the merge of the merge").await;
+        let own = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(1_000),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Set,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        // The winner's own reminder must stay where it is, whatever is undone.
+        let theirs = s
+            .insert_moment(&NewMoment {
+                artifact_id: second.clone(),
+                kind: Kind::Due,
+                at: Some(9_000),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Set,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        s.carry_moments(&aid, &first).await.unwrap();
+        s.carry_moments(&first, &second).await.unwrap();
+        let on = |id: String| {
+            let s = s.clone();
+            async move {
+                sqlx::query_scalar!("SELECT artifact_id FROM moments WHERE id = ?", id)
+                    .fetch_one(&s.pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(on(own.clone()).await, second);
+
+        // Undone in the order it was done: one step back each time.
+        assert_eq!(s.return_moments(&second, &first).await.unwrap(), 1);
+        assert_eq!(on(own.clone()).await, first);
+        assert_eq!(on(theirs.clone()).await, second);
+        assert_eq!(s.return_moments(&first, &aid).await.unwrap(), 1);
+        assert_eq!(
+            on(own).await,
+            aid,
+            "the reminder stays on a note nobody sees"
+        );
+        assert_eq!(
+            s.return_moments(&first, &aid).await.unwrap(),
+            0,
+            "nothing left to return"
         );
     }
 

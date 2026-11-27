@@ -530,10 +530,6 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     tracing::info!(artifact_id = %chunk.id, parts = parts.len(), "split oversize chunk into siblings");
 
     let base = chunk.ordinal;
-    // Make room first: `base * 1000 + i` sorts siblings after later chunks.
-    core.store
-        .make_room_after(corpus_id, base, parts.len() as i64 - 1)
-        .await?;
     let new: Vec<NewArtifact> = parts
         .iter()
         .enumerate()
@@ -551,8 +547,10 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
         })
         .collect();
 
-    let inserted = core.store.insert_artifacts(corpus_id, &new).await?;
-    core.store.delete_artifact(&chunk.id).await?;
+    let inserted = core
+        .store
+        .replace_with_siblings(corpus_id, &chunk.id, base, &new)
+        .await?;
     core.vectors
         .delete_artifacts(std::slice::from_ref(&chunk.id))
         .await?;
@@ -662,37 +660,52 @@ async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>
         })
         .collect();
     core.vectors.upsert(points).await?;
-
-    // A transition may have landed during the unlocked write; a row that disagrees now is the race.
-    {
-        let _guard = core.lifecycle_lock.lock().await;
-        let mut fix = Vec::new();
-        for (id, status, superseded_by) in &written {
-            match core.store.get_artifact(id).await {
-                Ok(fresh) if fresh.status != *status || fresh.superseded_by != *superseded_by => {
-                    // Marked whichever way the row moved: the point exists now, so either
-                    // disagreement is drift.
-                    core.store.mark_lifecycle_dirty(id).await?;
-                    marked.push(id.clone());
-                    fix.push(crate::jobs::consolidate::lifecycle_row_of(&fresh));
-                }
-                Ok(_) => {}
-                // An orphan is `heal_store_drift`'s to report.
-                Err(Error::NotFound) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        if !fix.is_empty() {
-            tracing::info!(
-                repaired = fix.len(),
-                "a lifecycle transition landed while these points were being written"
-            );
-            core.vectors.apply_lifecycle(&fix).await?;
-        }
-    }
+    settle_written(core, &written, &mut marked).await?;
 
     // Only after every write returns, or a failed write becomes permanent drift.
     core.store.clear_lifecycle_dirty(&marked).await?;
+    Ok(())
+}
+
+/// A transition may have landed during the unlocked write; a row that disagrees now is the race.
+async fn settle_written(
+    core: &Core,
+    written: &[(String, ArtifactStatus, Option<String>)],
+    marked: &mut Vec<String>,
+) -> Result<()> {
+    let _guard = core.lifecycle_lock.lock().await;
+    let mut fix = Vec::new();
+    let mut orphaned = Vec::new();
+    for (id, status, superseded_by) in written {
+        match core.store.get_artifact(id).await {
+            Ok(fresh) if fresh.status != *status || fresh.superseded_by != *superseded_by => {
+                // Marked whichever way the row moved: the point exists now, so either
+                // disagreement is drift.
+                core.store.mark_lifecycle_dirty(id).await?;
+                marked.push(id.clone());
+                fix.push(crate::jobs::consolidate::lifecycle_row_of(&fresh));
+            }
+            Ok(_) => {}
+            // Deleted during the write: the point just written is this embed's to take back,
+            // or the deleted text stays searchable until someone reads the drift report.
+            Err(Error::NotFound) => orphaned.push(id.clone()),
+            Err(e) => return Err(e),
+        }
+    }
+    if !orphaned.is_empty() {
+        tracing::info!(
+            points = orphaned.len(),
+            "deleted while being embedded; points removed"
+        );
+        core.vectors.delete_artifacts(&orphaned).await?;
+    }
+    if !fix.is_empty() {
+        tracing::info!(
+            repaired = fix.len(),
+            "a lifecycle transition landed while these points were being written"
+        );
+        core.vectors.apply_lifecycle(&fix).await?;
+    }
     Ok(())
 }
 
@@ -707,10 +720,11 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
     if core.store.pending_embed_count(corpus_id).await? > 0 {
         return Ok(());
     }
-    let status = if core.store.failed_embed_count(corpus_id).await? > 0 {
-        CorpusStatus::Partial
-    } else if was == CorpusStatus::Partial {
-        // A window the model refused leaves a hole that clean chunks do not fill.
+    // From what is failed now, not from `was`: a chunk that embeds after an outage makes the
+    // source whole, while a window the model refused stays a hole.
+    let holed = core.store.failed_embed_count(corpus_id).await? > 0
+        || core.store.has_failed_segment(corpus_id).await?;
+    let status = if holed {
         CorpusStatus::Partial
     } else {
         CorpusStatus::Ready
@@ -805,6 +819,30 @@ mod tests {
                 .unwrap()
                 .contains(&ids[0]),
             "the embed wrote a point for an artifact that no longer exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_deleted_during_the_write_takes_its_point_with_it() {
+        let core = crate::core::test_support::test_core().await;
+        let (_, ids) = corpus_with_pending_chunks(&core, 1).await;
+        let live = core.store.get_artifact(&ids[0]).await.unwrap();
+        embed_batch(&core, std::slice::from_ref(&live))
+            .await
+            .unwrap();
+        let points = || async { core.vectors.all_artifact_ids().await.unwrap() };
+        assert!(points().await.contains(&ids[0]));
+
+        // The delete landed while the write was on its way: the row is gone when it is checked.
+        core.store.delete_artifact(&ids[0]).await.unwrap();
+        let written = [(ids[0].clone(), ArtifactStatus::Active, None)];
+        settle_written(&core, &written, &mut Vec::new())
+            .await
+            .unwrap();
+
+        assert!(
+            !points().await.contains(&ids[0]),
+            "a deleted note's text stays searchable from its point"
         );
     }
 
@@ -1630,6 +1668,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chunk_that_embeds_after_an_outage_makes_the_source_whole_again() {
+        let core = test_core().await;
+        let (src_id, ids) = seed(&core, &["one", "two"]).await;
+        run(&core, &ids[0]).await.unwrap();
+        // The endpoint was down for every attempt; the unit stays armed at the ceiling.
+        core.store.mark_embed_failed(&ids[1]).await.unwrap();
+        settle_corpus(&core, &src_id).await.unwrap();
+        let status = || async { core.store.get_corpus(&src_id).await.unwrap().status };
+        assert_eq!(status().await, CorpusStatus::Partial);
+
+        run(&core, &ids[1]).await.unwrap();
+
+        assert_eq!(
+            status().await,
+            CorpusStatus::Ready,
+            "every chunk is embedded and the source still reads as broken"
+        );
+    }
+
+    #[tokio::test]
     async fn a_whole_source_is_embedded_in_one_inference_call() {
         let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
         let (src_id, ids) = seed(&core, &["one", "two", "three", "four", "five"]).await;
@@ -1717,6 +1775,21 @@ mod tests {
     async fn a_partially_segmented_source_is_not_promoted_to_ready() {
         let core = test_core().await;
         let (src_id, _) = seed(&core, &["one", "two"]).await;
+        // One window the model refused: the hole clean chunks do not fill.
+        let window = crate::store::segments::NewSegment {
+            start_line: 1,
+            end_line: 2,
+            text: "raw",
+        };
+        core.store
+            .upsert_segments(&src_id, &[window])
+            .await
+            .unwrap();
+        let failed = crate::store::segments::SegmentState::Failed;
+        core.store
+            .set_segment_state(&src_id, 0, failed, Some("refused"))
+            .await
+            .unwrap();
         core.store
             .set_corpus_status(&src_id, CorpusStatus::Partial)
             .await

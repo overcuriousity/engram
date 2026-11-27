@@ -34,6 +34,23 @@ fn status_of(payload: &super::VectorPayload) -> ArtifactStatus {
     payload.status.unwrap_or(ArtifactStatus::Active)
 }
 
+/// The one filter every listing here applies, as Qdrant's `build_filter` does.
+fn admits(payload: &super::VectorPayload, filter: &SearchFilter) -> bool {
+    let status = status_of(payload);
+    status != ArtifactStatus::Trashed
+        && (filter.include_superseded || status != ArtifactStatus::Superseded)
+        && (filter.include_deprecated || status != ArtifactStatus::Deprecated)
+        && filter.tags.iter().all(|t| payload.tags.contains(t))
+        && filter
+            .category
+            .as_ref()
+            .is_none_or(|c| payload.category.as_ref() == Some(c))
+        && filter
+            .corpus_id
+            .as_ref()
+            .is_none_or(|c| &payload.corpus_id == c)
+}
+
 /// Ties break on the value so HashMap order never reaches the page.
 fn ranked(counts: HashMap<&str, u64>, limit: usize) -> Vec<FacetCount> {
     let mut out: Vec<FacetCount> = counts
@@ -320,21 +337,7 @@ impl VectorStore for MemoryVectors {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut hits: Vec<SearchHit> = r
             .values()
-            .filter(|p| {
-                let status = status_of(&p.payload);
-                status != ArtifactStatus::Trashed
-                    && (filter.include_superseded || status != ArtifactStatus::Superseded)
-                    && (filter.include_deprecated || status != ArtifactStatus::Deprecated)
-                    && filter.tags.iter().all(|t| p.payload.tags.contains(t))
-                    && filter
-                        .category
-                        .as_ref()
-                        .is_none_or(|c| p.payload.category.as_ref() == Some(c))
-                    && filter
-                        .corpus_id
-                        .as_ref()
-                        .is_none_or(|c| &p.payload.corpus_id == c)
-            })
+            .filter(|p| admits(&p.payload, filter))
             .map(|p| {
                 // Dense only, so the ranking score is the similarity.
                 let similarity = cosine(vector, &p.vector);
@@ -361,7 +364,9 @@ impl VectorStore for MemoryVectors {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut categories: HashMap<&str, u64> = HashMap::new();
-        for p in r.values() {
+        // What a search with no filter would list: a chip's number is what choosing it shows.
+        let shown = SearchFilter::default();
+        for p in r.values().filter(|p| admits(&p.payload, &shown)) {
             if let Some(c) = &p.payload.category {
                 *categories.entry(c.as_str()).or_default() += 1;
             }
@@ -435,12 +440,7 @@ impl VectorStore for MemoryVectors {
             .iter()
             // A set without a point has no payload to render; the sweep ran before the embedding did.
             .filter_map(|(id, set)| points.get(id).map(|p| (p, set)))
-            .filter(|(p, _)| {
-                let status = status_of(&p.payload);
-                status != ArtifactStatus::Trashed
-                    && (filter.include_superseded || status != ArtifactStatus::Superseded)
-                    && (filter.include_deprecated || status != ArtifactStatus::Deprecated)
-            })
+            .filter(|(p, _)| admits(&p.payload, filter))
             .map(|(p, set)| SearchHit {
                 payload: p.payload.clone(),
                 // `max_sim`: the best situation, which is why a set beats a mean.

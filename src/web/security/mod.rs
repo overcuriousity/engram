@@ -15,7 +15,7 @@ use url::Url;
 
 pub use client_ip::ClientIp;
 pub use headers::CSP;
-pub use rate::{RateLayer, rate_limit};
+pub use rate::{RateLayer, rate_limit, rate_limit_all};
 
 const LOOPBACK_NAMES: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
 

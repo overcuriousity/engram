@@ -252,6 +252,23 @@ pub fn check(dir: &Path) -> Result<Manifest> {
     Ok(m)
 }
 
+/// `check`, then SQLite's own word on every archived database.
+pub async fn check_sound(dir: &Path) -> Result<Manifest> {
+    let m = check(dir)?;
+    let mut files = vec![m.control.file.clone()];
+    files.extend(m.tenants.iter().map(|t| t.db.file.clone()));
+    for file in files {
+        let found = crate::backup::sqlite::unsound(&dir.join(&file)).await?;
+        if let Some(first) = found.first() {
+            return Err(Error::Store(format!(
+                "{file} is damaged inside: {first} ({} in all)",
+                found.len()
+            )));
+        }
+    }
+    Ok(m)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +406,22 @@ mod tests {
         for secret in ["sub-a", "a@example.com", "http"] {
             assert!(!text.contains(secret), "manifest holds {secret:?}: {text}");
         }
+    }
+
+    #[tokio::test]
+    async fn backup_check_names_an_archived_database_that_is_damaged_inside() {
+        let base = two_tenants().await;
+        let live = Path::new(&base.cfg.store.dir).join(format!("{}.db", base.slugs[0]));
+        crate::backup::sqlite::tests::orphan(&live).await;
+        let fx = vectors_for(&base, &base.slugs).await;
+        take_with(&base.cfg, &base.archive, false, Backend::Qdrant, &fx)
+            .await
+            .unwrap();
+
+        // Every byte is the byte that was written, so the checksums agree.
+        check(&base.archive).unwrap();
+        let e = check_sound(&base.archive).await.unwrap_err().to_string();
+        assert!(e.contains(&base.slugs[0]), "{e}");
     }
 
     #[tokio::test]

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM meta WHERE key = 'journal.retired'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "b3453bf59ead7528d48834ef5831832ae2508456654772eaa91919158034c1d2"
+}

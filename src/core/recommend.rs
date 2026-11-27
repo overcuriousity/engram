@@ -7,6 +7,8 @@ use crate::error::Result;
 
 /// Each candidate's clusters are rescored locally, which is free next to the round trip.
 pub const CANDIDATES: usize = 10;
+/// How much further the offer looks, once, when the first page held nothing of the scope asked for.
+const WIDER: usize = 20;
 
 /// Enough to say what decided it, short enough to stay one line.
 pub const NAMED_BLOCKS: usize = 3;
@@ -78,19 +80,32 @@ impl Core {
         let now_at = self.clock.now();
         let now = encode(now_at, bundle, &self.recommend.weights);
 
-        // `must_not`, as in search, so a hand-written point with no `status` key is still offered.
-        let hits = self
-            .vectors
-            .context_query(&now, CANDIDATES, &Default::default())
-            .await
-            .unwrap_or_else(|e| {
-                // A vector store that cannot answer must not take the search page down.
-                tracing::warn!(error = %e, "context query unavailable; falling through the ladder");
-                Vec::new()
-            });
-
-        let ids: Vec<String> = hits.iter().map(|h| h.payload.artifact_id.clone()).collect();
-        let clusters = self.store.context_clusters_of(&ids).await?;
+        // The scope cut comes after the store's limit (see below), so a page spent on other
+        // scopes is asked for once more, wider; one query in every other case.
+        let mut limit = CANDIDATES;
+        let (hits, clusters) = loop {
+            // `must_not`, as in search, so a hand-written point with no `status` key is still
+            // offered.
+            let hits = self
+                .vectors
+                .context_query(&now, limit, &Default::default())
+                .await
+                .unwrap_or_else(|e| {
+                    // A vector store that cannot answer must not take the search page down.
+                    tracing::warn!(error = %e, "context query unavailable; falling through the ladder");
+                    Vec::new()
+                });
+            let ids: Vec<String> = hits.iter().map(|h| h.payload.artifact_id.clone()).collect();
+            let clusters = self.store.context_clusters_of(&ids).await?;
+            let ours = clusters
+                .values()
+                .flatten()
+                .any(|c| c.scope.as_deref() == scope);
+            if ours || hits.len() < limit || limit > CANDIDATES {
+                break (hits, clusters);
+            }
+            limit = CANDIDATES * WIDER;
+        };
 
         // Ranked by `context_score`, reproducing `max_sim`'s choice; every candidate is tried in
         // order because the rung also turns on `firm_at`, so the closest may fail where the second
@@ -627,6 +642,26 @@ mod tests {
                 "alice's Friday was offered to {who}: {offer:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn another_persons_situations_do_not_crowd_ones_own_out_of_the_offer() {
+        let core = recommending_core(FRIDAY).await;
+        let now = encode(FRIDAY, &phone_bundle(), &core.recommend.weights);
+        // More of alice's than the store is asked for, every one as close as can be.
+        for n in 0..CANDIDATES + 2 {
+            let hers = seed_artifact(&core, &format!("alice's note {n}")).await;
+            learn_raw(&core, &hers, "alice", now.clone(), 9.0, 9).await;
+        }
+        let his = seed_artifact(&core, "bob's recycling centre").await;
+        learn_raw(&core, &his, "bob", now.clone(), 9.0, 9).await;
+
+        let offer = core.offer(Some("bob"), &phone_bundle()).await.unwrap();
+        assert_eq!(
+            offer.map(|o| o.artifact_id),
+            Some(his),
+            "the page of candidates was spent on someone else's situations"
+        );
     }
 
     #[tokio::test]

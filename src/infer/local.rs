@@ -237,6 +237,36 @@ impl LocalEmbedder {
     }
 }
 
+/// As `HttpEmbedder` checks its endpoint: a model file of another width than the base was
+/// embedded at gives vectors nothing stored can be compared with.
+fn of_width(vectors: Vec<Vec<f32>>, dim: usize) -> Result<Vec<Vec<f32>>> {
+    match vectors.iter().find(|v| v.len() != dim) {
+        Some(v) => Err(failed(
+            "embed",
+            format!(
+                "dimension mismatch: config says {dim}, the model gives {}",
+                v.len()
+            ),
+        )),
+        None => Ok(vectors),
+    }
+}
+
+/// The tokens left for the answer. A long prompt shortens it, as the HTTP completer's ceiling
+/// does; refused only where what is left is no answer.
+fn answer_room(prompt: usize, ceiling: usize, n_ctx: usize) -> Result<usize> {
+    let room = ceiling.min(n_ctx.saturating_sub(prompt));
+    if room < crate::infer::budget::MIN_REPLY_TOKENS.min(ceiling.max(1)) {
+        return Err(failed(
+            "ask",
+            format!(
+                "the prompt is {prompt} tokens and the window {n_ctx}: {room} are left for an answer"
+            ),
+        ));
+    }
+    Ok(room)
+}
+
 fn embed_one(
     model: &LlamaModel,
     ctx: &mut LlamaContext,
@@ -271,7 +301,7 @@ impl Embedder for LocalEmbedder {
             texts: texts.to_vec(),
             reply,
         });
-        answer("embed", rx).await
+        of_width(answer("embed", rx).await?, self.dim)
     }
     fn templates(&self) -> &EmbedTemplates {
         &self.templates
@@ -479,16 +509,7 @@ fn generate(
     let tokens = model
         .str_to_token(&prompt, AddBos::Never)
         .map_err(|e| failed("ask", e))?;
-    if tokens.len() + job.ceiling > n_ctx {
-        return Err(failed(
-            "ask",
-            format!(
-                "the prompt is {} tokens and the answer may be {}; the window is {n_ctx}",
-                tokens.len(),
-                job.ceiling
-            ),
-        ));
-    }
+    let ceiling = answer_room(tokens.len(), job.ceiling, n_ctx)?;
 
     ctx.clear_kv_cache();
     let mut batch = LlamaBatch::new(PROMPT_BATCH, 1);
@@ -514,7 +535,8 @@ fn generate(
     // Some templates open the thinking themselves; the model then writes only the closing tag.
     let mut split = ThinkSplit::new(prompt.trim_end().ends_with(THINK_OPEN));
     let mut text = String::new();
-    let emit = |parts: Vec<(bool, String)>, text: &mut String| {
+    let mut sink = job.sink.clone().map(crate::infer::Sink::new);
+    let mut emit = |parts: Vec<(bool, String)>, text: &mut String| {
         for (thinking, mut part) in parts {
             if !thinking && text.is_empty() {
                 part = part.trim_start().to_string();
@@ -525,9 +547,9 @@ fn generate(
             if !thinking {
                 text.push_str(&part);
             }
-            if let Some(sink) = &job.sink {
-                // A reader that went away does not stop the answer; see `Completer::answer_streaming`.
-                let _ = sink.blocking_send(if thinking {
+            if let Some(sink) = &mut sink {
+                // A reader gone or stalled does not stop the answer; see `infer::Sink`.
+                sink.offer_blocking(if thinking {
                     Delta::Reasoning(part)
                 } else {
                     Delta::Token(part)
@@ -536,7 +558,7 @@ fn generate(
         }
     };
     let mut truncated = true;
-    for step in 0..job.ceiling {
+    for step in 0..ceiling {
         let pos = (tokens.len() + step) as i32;
         let token = sampler.sample(ctx, batch.n_tokens() - 1);
         sampler.accept(token);
@@ -700,6 +722,26 @@ impl crate::infer::Transcriber for LocalTranscriber {
 mod tests {
     use super::*;
     use crate::infer::Embedder;
+
+    #[test]
+    fn a_vector_of_another_width_than_the_config_is_refused() {
+        // A model file swapped under a base: its vectors cannot be compared with what is stored.
+        let wide = vec![vec![0.0; 8], vec![0.0; 6]];
+        let e = of_width(wide, 8).unwrap_err();
+        assert!(e.to_string().contains("6"), "{e}");
+        assert_eq!(of_width(vec![vec![0.0; 8]], 8).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_long_prompt_shortens_the_answer_instead_of_refusing_it() {
+        // What the HTTP completer does with the same window.
+        assert_eq!(answer_room(900, 512, 1024).unwrap(), 124);
+        assert_eq!(answer_room(100, 512, 1024).unwrap(), 512);
+        assert!(
+            answer_room(1020, 512, 1024).is_err(),
+            "four tokens are not an answer"
+        );
+    }
 
     pub(super) fn model(name: &str) -> Option<std::path::PathBuf> {
         let path = std::env::var_os("ENGRAM_TEST_MODELS")

@@ -299,16 +299,19 @@ pub struct RetryingJob {
 
 /// An on-demand model load takes ten minutes; six hours heals the same day while capping
 /// text the model never accepts at four calls a day.
+pub const BACKOFF_CEILING_SECS: i64 = 21_600;
+
 pub fn backoff_secs(attempts: i64) -> i64 {
     let exp = attempts.clamp(1, 16) as u32;
-    2i64.saturating_pow(exp).min(21_600)
+    2i64.saturating_pow(exp).min(BACKOFF_CEILING_SECS)
 }
 
 /// Units failing together would re-arm together against a shared limiter. Additive, so a
 /// refusal is never cheaper to retry; half a gap, so 1.5 × 2ⁿ stays below 2ⁿ⁺¹.
 fn spread_backoff(attempts: i64) -> i64 {
     use std::hash::{BuildHasher, Hasher};
-    let gap = backoff_secs(attempts);
+    // Two thirds of the ceiling at most, so the spread on top still ends at six hours.
+    let gap = backoff_secs(attempts).min(BACKOFF_CEILING_SECS * 2 / 3);
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_i64(now());
     gap + (h.finish() % (gap.max(1) as u64 / 2 + 1)) as i64
@@ -734,8 +737,9 @@ impl Store {
         Ok(oldest.map(|t| (now() - t).max(0)))
     }
 
-    /// Not any pending row (periodic sweeps park far out) and not `class = 0` (aged sweeps).
-    /// Counts reading stages that are running and not stuck, pending and due, or retrying.
+    /// Reading stages running and not stuck, pending and due, or retrying with attempts left:
+    /// not any pending row (sweeps park far out), not one parked at the ceiling. An embed counts
+    /// for a corpus only; an artifact's is a merge, a condensation or an edit.
     pub async fn capture_being_read(&self) -> Result<bool> {
         // Built from the stage list, so a new stage answers `reads_a_capture`.
         let stages: Vec<&str> = Stage::ALL
@@ -747,8 +751,9 @@ impl Store {
         let sql = sqlx::AssertSqlSafe(format!(
             "SELECT 1 FROM jobs
               WHERE subject = ? AND stage IN ('{}')
+                AND NOT (stage = 'embed' AND target_kind <> 'corpus')
                 AND (   (state = 'running' AND claimed_at > ?)
-                     OR (state = 'pending' AND (run_after <= ? OR attempts > 0)))
+                     OR (state = 'pending' AND (run_after <= ? OR attempts BETWEEN 1 AND ?)))
               LIMIT 1",
             stages.join("','")
         ));
@@ -757,6 +762,7 @@ impl Store {
             .bind(&self.subject)
             .bind(now() - crate::jobs::STUCK_AFTER_SECS)
             .bind(now())
+            .bind(MAX_ATTEMPTS - 1)
             .fetch_optional(&self.control.pool)
             .await?;
         Ok(r.is_some())
@@ -773,6 +779,28 @@ impl Control {
 
     /// A held unit is untouched: not claimed, not failed, its place kept.
     pub async fn claim_job_holding(&self, held: &[Stage]) -> Result<Option<(String, Job)>> {
+        loop {
+            let Some((subject, id, stage, job)) = self.claim_row(held).await? else {
+                return Ok(None);
+            };
+            match job {
+                Some(job) => return Ok(Some((subject, job))),
+                // Written by a newer build and met after a rollback: set aside for the build
+                // that knows it, never run as some other stage.
+                None => {
+                    tracing::warn!(stage = %stage, "a unit of a stage this build does not know; set aside");
+                    let why = format!("stage `{stage}` is unknown to this build");
+                    self.fail_job(id, MAX_ATTEMPTS, &why).await?;
+                }
+            }
+        }
+    }
+
+    /// One claimed row; the job is `None` where its stage name does not parse.
+    async fn claim_row(
+        &self,
+        held: &[Stage],
+    ) -> Result<Option<(String, i64, String, Option<Job>)>> {
         let except = if held.is_empty() {
             String::new()
         } else {
@@ -798,17 +826,16 @@ impl Control {
         let row = q.fetch_optional(&self.pool).await?;
 
         Ok(row.map(|r| {
-            (
-                r.get::<String, _>("subject"),
-                Job {
-                    id: r.get("id"),
-                    stage: Stage::parse(r.get::<String, _>("stage").as_str())
-                        .unwrap_or(Stage::Synthesize),
-                    target_kind: r.get("target_kind"),
-                    target_id: r.get("target_id"),
-                    attempts: r.get("attempts"),
-                },
-            )
+            let id: i64 = r.get("id");
+            let stage: String = r.get("stage");
+            let job = Stage::parse(&stage).map(|stage| Job {
+                id,
+                stage,
+                target_kind: r.get("target_kind"),
+                target_id: r.get("target_id"),
+                attempts: r.get("attempts"),
+            });
+            (r.get::<String, _>("subject"), id, stage, job)
         }))
     }
 
@@ -828,9 +855,11 @@ impl Control {
         Ok(q.fetch_one(&self.pool).await?)
     }
 
+    /// Only the claim: an arming that landed mid-run made the row `pending` again, and stays.
     pub async fn complete_job(&self, id: i64) -> Result<()> {
         sqlx::query!(
-            "UPDATE jobs SET state = 'done', last_error = NULL, claimed_at = NULL WHERE id = ?",
+            "UPDATE jobs SET state = 'done', last_error = NULL, claimed_at = NULL
+              WHERE id = ? AND state = 'running'",
             id
         )
         .execute(&self.pool)
@@ -841,17 +870,41 @@ impl Control {
     /// No terminal state: past `MAX_ATTEMPTS` the delay is at its ceiling, so an outage heals.
     pub async fn fail_job(&self, id: i64, attempts: i64, err: &str) -> Result<()> {
         sqlx::query!(
-            "UPDATE jobs SET state = 'pending', run_after = ?, last_error = ?, claimed_at = NULL WHERE id = ?",
+            "UPDATE jobs SET state = 'pending', run_after = ?, last_error = ?, claimed_at = NULL
+              WHERE id = ? AND state = 'running'",
             now() + spread_backoff(attempts),
             err,
             id
         )
-            .execute(&self.pool)
+        .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Rows left 'running' by a crashed process. Called once at startup.
+    /// Every `running` row, for a start under the server lock: nobody else can be running them.
+    pub async fn reclaim_orphans(&self) -> Result<u64> {
+        let res = sqlx::query!(
+            "UPDATE jobs SET state = 'pending', run_after = 0, claimed_at = NULL
+              WHERE state = 'running'"
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// A unit still running says so, or `reclaim_stuck` hands a long one to a second worker.
+    pub async fn beat(&self, id: i64) -> Result<()> {
+        sqlx::query!(
+            "UPDATE jobs SET claimed_at = ? WHERE id = ? AND state = 'running'",
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Rows whose owner stopped beating: a process that died without a restart in between.
     pub async fn reclaim_stuck(&self, older_than_secs: i64) -> Result<u64> {
         let res = sqlx::query!(
             "UPDATE jobs SET state = 'pending', run_after = 0, claimed_at = NULL
@@ -904,6 +957,22 @@ impl Store {
 
     /// The workers claim instance-wide; this is for tests stepping a single base.
     pub async fn claim_job(&self) -> Result<Option<Job>> {
+        loop {
+            let Some((id, stage, job)) = self.claim_own_row().await? else {
+                return Ok(None);
+            };
+            match job {
+                Some(job) => return Ok(Some(job)),
+                // As `Control::claim_job_holding`: set aside, never run as another stage.
+                None => {
+                    let why = format!("stage `{stage}` is unknown to this build");
+                    self.fail_job(id, MAX_ATTEMPTS, &why).await?;
+                }
+            }
+        }
+    }
+
+    async fn claim_own_row(&self) -> Result<Option<(i64, String, Option<Job>)>> {
         let row = sqlx::query!(
             "UPDATE jobs
                 SET state = 'running', claimed_at = ?, attempts = attempts + 1
@@ -920,12 +989,15 @@ impl Store {
         .fetch_optional(&self.control.pool)
         .await?;
 
-        Ok(row.map(|r| Job {
-            id: r.id,
-            stage: Stage::parse(r.stage.as_str()).unwrap_or(Stage::Synthesize),
-            target_kind: r.target_kind,
-            target_id: r.target_id,
-            attempts: r.attempts,
+        Ok(row.map(|r| {
+            let job = Stage::parse(r.stage.as_str()).map(|stage| Job {
+                id: r.id,
+                stage,
+                target_kind: r.target_kind,
+                target_id: r.target_id,
+                attempts: r.attempts,
+            });
+            (r.id, r.stage, job)
         }))
     }
 }
@@ -1534,6 +1606,11 @@ mod tests {
         assert_eq!(attempts, 1, "the sweep reset a unit's attempt count");
         assert!(run_after > now(), "the sweep cleared a unit's backoff");
 
+        // The retry comes round and succeeds.
+        sqlx::query!("UPDATE jobs SET state = 'running' WHERE id = ?", j.id)
+            .execute(&s.control.pool)
+            .await
+            .unwrap();
         s.complete_job(j.id).await.unwrap();
         s.rearm_idle_seq(Stage::SegmentWindow, "segment", "src-1#0", 0)
             .await
@@ -1542,6 +1619,42 @@ mod tests {
             s.claim_job().await.unwrap().is_some(),
             "the sweep left a closed unit's unfinished work unarmed"
         );
+    }
+
+    #[tokio::test]
+    async fn a_unit_given_up_on_for_now_is_not_a_capture_being_read() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::SegmentWindow, "segment", "c-1#0")
+            .await
+            .unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.fail_job(j.id, 1, "endpoint down").await.unwrap();
+        assert!(
+            s.capture_being_read().await.unwrap(),
+            "a first retry is still reading"
+        );
+
+        // Every attempt spent: it waits hours at the ceiling, and the line would say reading
+        // for as long as the model keeps refusing.
+        sqlx::query!(
+            "UPDATE jobs SET attempts = ? WHERE id = ?",
+            MAX_ATTEMPTS,
+            j.id
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
+        assert!(!s.capture_being_read().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_background_re_embed_is_not_a_capture_being_read() {
+        let s = Store::memory().await.unwrap();
+        // A merge, a condensation or an edit re-embeds one artifact; nothing was captured.
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        assert!(!s.capture_being_read().await.unwrap());
+        s.enqueue(Stage::Embed, "corpus", "c-1").await.unwrap();
+        assert!(s.capture_being_read().await.unwrap());
     }
 
     #[tokio::test]
@@ -1648,7 +1761,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_claim_older_than_the_stuck_threshold_is_nobody_reading() {
-        // `reclaim_stuck` runs once at startup, so a stale `running` row needs the age check.
+        // A claim nobody refreshes belongs to a dead owner, so a stale `running` row needs the age check.
         let s = Store::memory().await.unwrap();
         s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
@@ -1948,5 +2061,127 @@ mod tests {
         assert!(!Stage::GENERATORS.contains(&Stage::Decisions));
         assert_eq!(Stage::Decisions.class(), 1);
         assert!(!Stage::Decisions.reads_a_capture());
+    }
+
+    async fn row_state(s: &Store, id: i64) -> (String, i64, i64) {
+        let r = sqlx::query!(
+            "SELECT state, attempts, run_after FROM jobs WHERE id = ?",
+            id
+        )
+        .fetch_one(&s.control.pool)
+        .await
+        .unwrap();
+        (r.state, r.attempts, r.run_after)
+    }
+
+    #[tokio::test]
+    async fn a_unit_of_a_stage_this_build_does_not_know_is_set_aside_not_run_as_another() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        // Written by a newer build, then the binary was rolled back; first in line.
+        sqlx::query!("UPDATE jobs SET stage = 'from-a-newer-build', seq = -1")
+            .execute(&s.control.pool)
+            .await
+            .unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-2").await.unwrap();
+
+        let (_, got) = s
+            .control
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("the known unit");
+        assert_eq!((got.stage, got.target_id.as_str()), (Stage::Embed, "a-2"));
+        let parked = sqlx::query!(
+            "SELECT state, run_after, last_error FROM jobs WHERE stage = 'from-a-newer-build'"
+        )
+        .fetch_one(&s.control.pool)
+        .await
+        .unwrap();
+        assert_eq!(parked.state, "pending", "kept for the build that knows it");
+        assert!(parked.run_after > now());
+        assert!(parked.last_error.is_some());
+    }
+
+    #[test]
+    fn a_retry_is_never_further_off_than_the_ceiling() {
+        for attempts in 1..40 {
+            for _ in 0..50 {
+                let wait = spread_backoff(attempts);
+                assert!(wait <= BACKOFF_CEILING_SECS, "{attempts}: {wait}");
+            }
+        }
+        assert!(spread_backoff(40) >= BACKOFF_CEILING_SECS * 2 / 3);
+        // Still never cheaper to be refused again.
+        assert!(spread_backoff(3) >= backoff_secs(3));
+    }
+
+    #[tokio::test]
+    async fn an_arming_that_lands_mid_run_survives_the_run_finishing() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        // An edit while the unit runs: the row goes back to pending for the new text.
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+
+        s.complete_job(j.id).await.unwrap();
+
+        assert_eq!(
+            row_state(&s, j.id).await.0,
+            "pending",
+            "the new arming was closed"
+        );
+        assert!(
+            s.claim_job().await.unwrap().is_some(),
+            "and nobody runs it again"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_arming_that_lands_mid_run_survives_the_run_failing() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+
+        s.fail_job(j.id, 5, "endpoint down").await.unwrap();
+
+        let (state, attempts, run_after) = row_state(&s, j.id).await;
+        assert_eq!((state.as_str(), attempts, run_after), ("pending", 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_start_takes_back_every_running_row_however_fresh() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(
+            s.control.reclaim_stuck(600).await.unwrap(),
+            0,
+            "too fresh for the age check"
+        );
+
+        assert_eq!(s.control.reclaim_orphans().await.unwrap(), 1);
+        assert_eq!(row_state(&s, j.id).await.0, "pending");
+    }
+
+    #[tokio::test]
+    async fn a_beat_keeps_a_long_unit_from_being_taken_back() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET claimed_at = ? WHERE id = ?",
+            now() - 3600,
+            j.id
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
+
+        s.control.beat(j.id).await.unwrap();
+
+        assert_eq!(s.control.reclaim_stuck(600).await.unwrap(), 0);
+        assert_eq!(row_state(&s, j.id).await.0, "running");
     }
 }

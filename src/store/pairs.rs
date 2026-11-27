@@ -23,7 +23,7 @@ pub const AWAITING_REVIEW: [PairState; 6] = [
     PairState::Contradiction,
     PairState::Superseded,
     PairState::Duplicate,
-    // The drain puts these back to `Pending`; listed until it has run.
+    // The drain puts `Vacuous` back to `Pending` and closes `Unmergeable`; listed until it has run.
     PairState::Vacuous,
     PairState::Unmergeable,
     PairState::Pending,
@@ -198,6 +198,8 @@ pub struct ArtifactPair {
     pub merged_into: Option<String>,
     /// `Some` when the pair may not act without a person, whatever its score.
     pub net: Option<Net>,
+    /// When the members were last rewritten; a decision from before is about other notes.
+    pub moved_at: Option<i64>,
 }
 
 /// Two counts: `jobs::did_work` reads this report, and counting only `moved` made the sweep
@@ -238,6 +240,7 @@ pub(crate) struct PairRow {
     pub synthesis_asked: i64,
     pub synthesis_by: Option<String>,
     pub net: Option<String>,
+    pub moved_at: Option<i64>,
 }
 
 pub(crate) fn row_to_pair(r: PairRow) -> ArtifactPair {
@@ -257,6 +260,7 @@ pub(crate) fn row_to_pair(r: PairRow) -> ArtifactPair {
         synthesis_asked: r.synthesis_asked != 0,
         synthesis_by: r.synthesis_by.as_deref().and_then(DecidedBy::parse),
         net: r.net.as_deref().map(Net::parse),
+        moved_at: r.moved_at,
     }
 }
 
@@ -661,7 +665,8 @@ impl Store {
     }
 
     /// Self-pairs and collisions are dismissed rather than moved; only `Pending` remains by
-    /// now. Counters reset; `score` goes stale but only orders the queue.
+    /// now. Counters reset and `moved_at` stamped: what was decided was about other members,
+    /// and `score` is theirs too until `dedupe::remeasured` reads it again.
     pub async fn repoint_open_pairs(&self, old: &[String], new_id: &str) -> Result<u64> {
         let mut moved = 0u64;
         for o in old {
@@ -712,10 +717,11 @@ impl Store {
                 sqlx::query!(
                     "UPDATE artifact_pairs
                         SET a_id = ?, b_id = ?, judge_attempts = 0, judge_unreadable = 0,
-                            detail = NULL
+                            detail = NULL, moved_at = ?
                       WHERE id = ?",
                     a,
                     b,
+                    now(),
                     p.id
                 )
                 .execute(&self.pool)
@@ -724,6 +730,18 @@ impl Store {
             }
         }
         Ok(moved)
+    }
+
+    /// For a pair whose members moved: the cosine of the two it names now.
+    pub async fn set_pair_score(&self, id: i64, score: f32) -> Result<()> {
+        sqlx::query!(
+            "UPDATE artifact_pairs SET score = ? WHERE id = ?",
+            score,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// For the one caller that acts on the row itself.
@@ -936,10 +954,11 @@ impl Store {
                 sqlx::query!(
                     "UPDATE artifact_pairs
                         SET a_id = ?, b_id = ?, judge_attempts = 0, judge_unreadable = 0,
-                            detail = NULL
+                            detail = NULL, moved_at = ?
                       WHERE id = ?",
                     a,
                     b,
+                    now(),
                     p.id
                 )
                 .execute(&self.pool)
@@ -1135,7 +1154,7 @@ impl Store {
             crate::store::pairs::PairRow,
             r#"SELECT p.id AS "id!", p.a_id, p.b_id, p.score, p.state, p.detail, p.created_at,
                       p.judge_attempts, p.judge_unreadable, p.obsolete_id, p.merged_into,
-                      p.decided_by, p.synthesis_asked, p.synthesis_by, p.net
+                      p.decided_by, p.synthesis_asked, p.synthesis_by, p.net, p.moved_at
                  FROM artifact_pairs p
                  JOIN artifacts a ON a.id = p.a_id
                  JOIN artifacts b ON b.id = p.b_id
@@ -1145,6 +1164,7 @@ impl Store {
                        WHERE d.question_id = 'pair_relation' AND d.subject_kind = 'pair'
                          AND d.subject_a = CAST(p.id AS TEXT) AND d.era = ?
                          AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev
+                         AND d.decided_at > COALESCE(p.moved_at, 0)
                          AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')
                 ORDER BY (COALESCE(p.net = 'decide', 0) AND p.judge_attempts = 0) DESC,
                          (p.score = 0 AND p.judge_attempts = 0) DESC,

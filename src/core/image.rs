@@ -28,6 +28,14 @@ pub const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 /// killer. Not configurable: it keeps the process alive, it is not a throughput setting.
 pub const MAX_CONCURRENT_DECODES: usize = 2;
 
+/// The formats `prepare` decodes.
+pub fn reads(format: ImageFormat) -> bool {
+    matches!(
+        format,
+        ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP
+    )
+}
+
 pub fn prepare(bytes: &[u8], preview_edge: u32) -> Result<PreparedImage> {
     let format = image::guess_format(bytes).map_err(|_| {
         Error::Validation("that upload is not a supported image (JPEG, PNG or WebP)".into())

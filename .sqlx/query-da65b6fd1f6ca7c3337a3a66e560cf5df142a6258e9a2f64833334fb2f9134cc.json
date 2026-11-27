@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM gap_rejections",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "da65b6fd1f6ca7c3337a3a66e560cf5df142a6258e9a2f64833334fb2f9134cc"
+}

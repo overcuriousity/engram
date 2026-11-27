@@ -163,7 +163,9 @@ pub async fn run(core: &Core) -> Result<Report> {
 /// Nobody searched, asked or captured for `evolve.idle_secs`.
 async fn quiet(core: &Core) -> Result<bool> {
     let idle = crate::store::now() - core.evolve.idle_secs.max(0);
-    Ok(!(core.store.activity_since(idle).await? || core.store.captured_since(idle).await?))
+    Ok(!(core.used_since(idle)
+        || core.store.activity_since(idle).await?
+        || core.store.captured_since(idle).await?))
 }
 
 /// A store write about one decision. A failure is logged and that decision waits for the next

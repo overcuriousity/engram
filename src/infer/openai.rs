@@ -281,8 +281,11 @@ impl Endpoint {
             finish_reason,
             "completion finished"
         );
+        // An empty string is no content, as on the streamed path: a reasoning model that spent
+        // the ceiling thinking sends exactly that.
         let text = v["choices"][0]["message"]["content"]
             .as_str()
+            .filter(|t| !t.is_empty())
             .map(str::to_string);
         self.reply(text, finish_reason, ceiling, "no message content")
     }
@@ -802,7 +805,14 @@ pub(crate) fn parse_sse_line(line: &str) -> Option<SseChunk> {
     if payload.is_empty() || payload == "[DONE]" {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let v: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            // Its tokens are lost; said, so a gap in an answer has a cause on record.
+            tracing::warn!(error = %e, "a stream frame could not be read and was skipped");
+            return None;
+        }
+    };
     if let Some(err) = v.get("error") {
         // `{"error":{"message":..}}` is OpenAI's shape, `{"error":"..."}` some servers'; else the whole object.
         let message = err
@@ -840,6 +850,8 @@ pub(crate) fn parse_sse_line(line: &str) -> Option<SseChunk> {
 #[derive(Default)]
 pub(crate) struct SseBuffer {
     buf: Vec<u8>,
+    /// The `[DONE]` sentinel came: the server finished, whatever it said about why.
+    ended: bool,
 }
 
 impl SseBuffer {
@@ -848,22 +860,33 @@ impl SseBuffer {
         let mut out = Vec::new();
         while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=nl).collect();
-            if let Some(c) = parse_sse_line(
-                String::from_utf8_lossy(&line[..line.len() - 1]).trim_end_matches('\r'),
-            ) {
+            let line = String::from_utf8_lossy(&line[..line.len() - 1]);
+            let line = line.trim_end_matches('\r');
+            self.ended |= is_done(line);
+            if let Some(c) = parse_sse_line(line) {
                 out.push(c);
             }
         }
         out
     }
 
+    pub(crate) fn ended(&self) -> bool {
+        self.ended
+    }
+
     /// A truncated connection is where the tokens already received are worth keeping.
     pub(crate) fn finish(&mut self) -> Vec<SseChunk> {
         let rest = std::mem::take(&mut self.buf);
-        parse_sse_line(String::from_utf8_lossy(&rest).trim_end_matches('\r'))
-            .into_iter()
-            .collect()
+        let rest = String::from_utf8_lossy(&rest);
+        let rest = rest.trim_end_matches('\r');
+        self.ended |= is_done(rest);
+        parse_sse_line(rest).into_iter().collect()
     }
+}
+
+fn is_done(line: &str) -> bool {
+    line.strip_prefix("data:")
+        .is_some_and(|p| p.trim() == "[DONE]")
 }
 
 pub struct HttpCompleter {
@@ -1036,6 +1059,7 @@ impl Completer for HttpCompleter {
         let ceiling = self.clamped(ceiling);
         let mut body = self.body(system, user);
         body["stream"] = json!(true);
+        let mut sink = crate::infer::Sink::new(sink);
 
         let mut res = self.ep.send_with_ceiling(body, Some(ceiling)).await?;
         // An endpoint that ignores `stream` sends the plain completion; that is the reply, delivered as one token.
@@ -1046,7 +1070,7 @@ impl Completer for HttpCompleter {
                 "asked to stream, answered whole; reading it as a completion"
             );
             let reply = self.ep.buffered_reply(res, Some(ceiling), started).await?;
-            let _ = sink.send(Delta::Token(reply.text.clone())).await;
+            sink.offer(Delta::Token(reply.text.clone())).await;
             return Ok(Completion {
                 text: reply.text,
                 truncated: reply.truncated,
@@ -1073,12 +1097,13 @@ impl Completer for HttpCompleter {
                     });
                 }
                 if let Some(r) = c.reasoning {
-                    // Send errors are ignored: the body is still read to its end so the connection is reusable and the GPU free.
-                    let _ = sink.send(Delta::Reasoning(r)).await;
+                    // A reader gone or stalled is not waited for: the body is still read to its end
+                    // so the connection is reusable and the GPU free.
+                    sink.offer(Delta::Reasoning(r)).await;
                 }
                 if let Some(t) = c.content {
                     text.push_str(&t);
-                    let _ = sink.send(Delta::Token(t)).await;
+                    sink.offer(Delta::Token(t)).await;
                 }
                 if c.finish_reason.is_some() {
                     finish_reason = c.finish_reason;
@@ -1102,9 +1127,18 @@ impl Completer for HttpCompleter {
             Some(ceiling),
             "the stream carried no message content",
         )?;
+        // Neither a reason nor the end marker: the connection went away mid-answer, and what
+        // came is kept as what it is, a part.
+        let broke_off = finish_reason.is_none() && !frames.ended();
+        if broke_off {
+            tracing::warn!(
+                role,
+                "the stream ended without finishing; the reply is cut off"
+            );
+        }
         Ok(Completion {
             text: reply.text,
-            truncated: reply.truncated,
+            truncated: reply.truncated || broke_off,
         })
     }
 
@@ -2158,6 +2192,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reply_whose_content_is_an_empty_string_is_no_reply() {
+        // What a reasoning model returns when thinking spent the ceiling: a string, and empty.
+        for (reason, says) in [
+            ("length", "max_output_tokens"),
+            ("stop", "no message content"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "choices":[{"message":{"content": ""}, "finish_reason": reason}]
+                })))
+                .mount(&server)
+                .await;
+            let got = HttpCompleter::for_pair_synthesis(&synthesize_cfg(server.uri()))
+                .complete("s", "u")
+                .await;
+            let e = got
+                .map(|_| ())
+                .expect_err("an empty string was handed on as the reply");
+            assert!(e.to_string().contains(says), "{reason}: {e}");
+        }
+    }
+
+    #[tokio::test]
     async fn an_empty_reply_at_the_ceiling_says_the_ceiling_was_spent() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -2450,6 +2509,45 @@ mod tests {
                 .unwrap();
             assert_eq!(done.truncated, want, "finish_reason {reason:?} read wrong");
         }
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_stops_reading_does_not_hold_the_call_open() {
+        let server = streaming_server(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"l\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n\
+             data: [DONE]\n\n",
+        )
+        .await;
+        // Still connected, never reading: the one slot fills and stays full.
+        let (tx, _held) = tokio::sync::mpsc::channel(1);
+        let completer = completer_against(&server.uri());
+        let call = completer.answer_streaming("s", "u", 64, tx);
+        let done = tokio::time::timeout(std::time::Duration::from_secs(15), call)
+            .await
+            .expect("the call waits on its reader for ever, holding the interactive lease")
+            .unwrap();
+        assert_eq!(done.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_breaks_off_is_not_stored_as_a_whole_answer() {
+        // No finish reason and no `[DONE]`: the connection went away mid-answer.
+        let server = streaming_server(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"the first ha\"}}]}\n\n",
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let done = completer_against(&server.uri())
+            .answer_streaming("s", "u", 64, tx)
+            .await
+            .unwrap();
+        assert_eq!(done.text, "the first ha");
+        assert!(
+            done.truncated,
+            "half an answer is kept as if it were all of it"
+        );
     }
 
     #[tokio::test]

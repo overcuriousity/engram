@@ -20,8 +20,14 @@ pub struct Registration {
     pub auth: String,
 }
 
-/// Replaces the row; keys are decoded so a bad one is named, and the endpoint is vetted as in Settings.
+/// What a registration is filed under: the token that paired the device, so two phones keep two.
+fn device_key(id: &crate::auth::Identity) -> String {
+    id.token.clone().unwrap_or_else(|| "browser".into())
+}
+
+/// Replaces this device's own; keys are decoded so a bad one is named, and the endpoint is vetted as in Settings.
 async fn register(
+    id: crate::auth::Identity,
     tenant: Tenant,
     headers: HeaderMap,
     Json(reg): Json<Registration>,
@@ -34,7 +40,13 @@ async fn register(
     crate::jobs::webpush::parse_keys(reg.p256dh.trim(), reg.auth.trim())?;
     let control = &tenant.core.store.control;
     let mut notify = control.notify(&tenant.user.subject).await?;
-    notify["unifiedpush"] = serde_json::json!({
+    // A registration from before devices were kept apart sits where the typed endpoint does.
+    if notify["unifiedpush"]["endpoint"] == endpoint
+        && let Some(map) = notify.as_object_mut()
+    {
+        map.remove("unifiedpush");
+    }
+    notify["devices"][device_key(&id)] = serde_json::json!({
         "endpoint": endpoint,
         "p256dh": reg.p256dh.trim(),
         "auth": reg.auth.trim(),
@@ -51,13 +63,21 @@ async fn register(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Answers the same whether or not a row stood.
-async fn unregister(tenant: Tenant) -> Result<StatusCode> {
+/// Answers the same whether or not a row stood. Only this device's own goes; one from before
+/// devices were kept apart cannot be told from another phone's, so it goes only where this
+/// device has no row of its own.
+async fn unregister(id: crate::auth::Identity, tenant: Tenant) -> Result<StatusCode> {
     let control = &tenant.core.store.control;
     let mut notify = control.notify(&tenant.user.subject).await?;
-    if let Some(map) = notify.as_object_mut()
-        && map.remove("unifiedpush").is_some()
-    {
+    let own = notify["devices"]
+        .as_object_mut()
+        .is_some_and(|d| d.remove(&device_key(&id)).is_some());
+    let earlier = !own
+        && notify["unifiedpush"]["p256dh"].is_string()
+        && notify
+            .as_object_mut()
+            .is_some_and(|m| m.remove("unifiedpush").is_some());
+    if own || earlier {
         control.set_notify(&tenant.user.subject, &notify).await?;
         tenant.core.store.rearm_remind().await?;
     }
@@ -128,6 +148,76 @@ mod tests {
         assert_eq!(json_of(res).await["public_key"], expected);
     }
 
+    fn endpoints(notify: &serde_json::Value) -> Vec<String> {
+        let mut found: Vec<String> = crate::jobs::remind::notify_targets(notify)
+            .into_iter()
+            .filter_map(|t| match t {
+                crate::jobs::remind::Target::UnifiedPush { endpoint, .. } => Some(endpoint),
+                _ => None,
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[tokio::test]
+    async fn two_phones_each_keep_their_own_registration() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, first) = app_with_token(core.clone()).await;
+        let (second_row, second) =
+            crate::auth::tokens::mint(&core.store.control, "tablet", "user-1", None)
+                .await
+                .unwrap();
+        for (token, endpoint) in [
+            (&first, "https://push.example/up/phone"),
+            (&second, "https://push.example/up/tablet"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(req(
+                    "PUT",
+                    "/api/v1/push/unifiedpush",
+                    Some(token),
+                    Some(a_registration(endpoint)),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        }
+        let notify = || async { core.store.control.notify("user-1").await.unwrap() };
+        assert_eq!(
+            endpoints(&notify().await),
+            [
+                "https://push.example/up/phone",
+                "https://push.example/up/tablet"
+            ],
+            "the second phone took the first one's place"
+        );
+
+        // Unpairing one phone takes its own registration and no other.
+        let res = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                "/api/v1/push/unifiedpush",
+                Some(&first),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            endpoints(&notify().await),
+            ["https://push.example/up/tablet"]
+        );
+
+        // A revoked token's phone is no longer pushed to.
+        crate::auth::tokens::revoke(&core.store.control, &second_row.id, "user-1")
+            .await
+            .unwrap();
+        assert!(endpoints(&notify().await).is_empty());
+    }
+
     #[tokio::test]
     async fn registering_stores_the_keys_and_names_the_device() {
         let core = crate::core::test_support::test_core().await;
@@ -150,17 +240,18 @@ mod tests {
             .notify(&core.store.subject)
             .await
             .unwrap();
-        assert_eq!(
-            notify["unifiedpush"]["endpoint"],
-            "https://push.example/up/1"
-        );
-        assert_eq!(notify["unifiedpush"]["p256dh"], reg["p256dh"]);
-        assert_eq!(notify["unifiedpush"]["auth"], reg["auth"]);
-        assert_eq!(
-            notify["unifiedpush"]["device"],
-            "engram-android/0.1 (Pixel 8)"
-        );
-        assert!(notify["unifiedpush"]["registered_at"].is_i64());
+        // Filed under the token that registered it, one entry however often it registers.
+        let own = |notify: &serde_json::Value| {
+            let devices = notify["devices"].as_object().expect("a device registered");
+            assert_eq!(devices.len(), 1);
+            devices.values().next().cloned().unwrap()
+        };
+        let stored = own(&notify);
+        assert_eq!(stored["endpoint"], "https://push.example/up/1");
+        assert_eq!(stored["p256dh"], reg["p256dh"]);
+        assert_eq!(stored["auth"], reg["auth"]);
+        assert_eq!(stored["device"], "engram-android/0.1 (Pixel 8)");
+        assert!(stored["registered_at"].is_i64());
 
         let again = a_registration("https://push.example/up/2");
         app.clone()
@@ -178,11 +269,9 @@ mod tests {
             .notify(&core.store.subject)
             .await
             .unwrap();
-        assert_eq!(
-            notify["unifiedpush"]["endpoint"],
-            "https://push.example/up/2"
-        );
-        assert_eq!(notify["unifiedpush"]["p256dh"], again["p256dh"]);
+        let stored = own(&notify);
+        assert_eq!(stored["endpoint"], "https://push.example/up/2");
+        assert_eq!(stored["p256dh"], again["p256dh"]);
 
         let targets = crate::jobs::remind::notify_targets(&notify);
         assert!(matches!(

@@ -2093,7 +2093,7 @@ async fn sleeping_core(name: &str) -> (engram::core::Core, engram::vector::qdran
         &config,
         std::sync::Arc::new(again),
         store,
-        Working::default(),
+        Working::new(engram::core::Shared::new(&config)),
     );
     (core, v)
 }
