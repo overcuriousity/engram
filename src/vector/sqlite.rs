@@ -573,6 +573,22 @@ impl VectorStore for SqliteVectors {
         filter: &SearchFilter,
         recency: Recency,
     ) -> Result<Vec<SearchHit>> {
+        // As Qdrant answers it: another width cannot be compared, and the `length` test in
+        // `dense` would turn it into an empty list that reads as "nothing matches".
+        // runtime: contained-only vector tables, absent from the reference database.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT value FROM vec_meta WHERE key='dim'")
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some(d) = stored.and_then(|d| d.parse::<usize>().ok())
+            && !vector.is_empty()
+            && d != vector.len()
+        {
+            return Err(Error::Vector(format!(
+                "the query vector is {} wide and the collection {d}",
+                vector.len()
+            )));
+        }
         let dense = self.dense(vector, limit, filter, None).await?;
         let mut hits = if sparse.is_empty() {
             // No indexable term: dense order, cosine as score, as in `qdrant.rs`.
@@ -699,10 +715,13 @@ impl VectorStore for SqliteVectors {
 
     async fn facets(&self, limit: usize) -> Result<Facets> {
         // runtime: contained-only vector tables, absent from the reference database.
-        let rows = sqlx::query(
-            "SELECT category, COUNT(*) AS n FROM vec_points WHERE category IS NOT NULL
-             GROUP BY category ORDER BY n DESC, category LIMIT ?",
-        )
+        // What a search with no filter would list: a chip's number is what choosing it shows.
+        let (shown, _) = Self::where_clause(&SearchFilter::default());
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT p.category AS category, COUNT(*) AS n FROM vec_points p
+              WHERE p.category IS NOT NULL AND {shown}
+              GROUP BY p.category ORDER BY n DESC, p.category LIMIT ?"
+        )))
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -863,6 +882,15 @@ mod tests {
                     .unwrap(),
             )
         });
+
+        #[tokio::test]
+        async fn a_query_of_another_width_is_refused() {
+            let s =
+                crate::vector::sqlite::SqliteVectors::memory(crate::vector::sqlite::Scoring::off())
+                    .await
+                    .unwrap();
+            crate::vector::conformance::a_query_of_another_width_is_refused(&s).await;
+        }
     }
 
     #[tokio::test]

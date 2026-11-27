@@ -29,7 +29,8 @@ https://github.com/overcuriousity/overcuriousity-dev-manifest/tree/v2026.11.1/ma
 - after changing a query or a schema: `cargo run -- --dev-schema target/sqlx-prepare.db`, then `DATABASE_URL=sqlite://target/sqlx-prepare.db cargo sqlx prepare -- --all-targets --features contained`; commit `.sqlx/`
 - `oc-check .` on a source checkout (a build writes `assets/app.css`, which holds the tokens; delete it first)
 - `node --test assets/js/*.test.mjs`
-- `cargo test --lib -- --ignored` and `cargo test --test browser_ask -- --ignored` with `ENGRAM_CHROME` set (layout at 390–2560 px)
+- `cargo test --lib -- --ignored --skip vector::qdrant::tests::live` and `cargo test --test browser_ask -- --ignored` with `ENGRAM_CHROME` set (layout at 390–2560 px)
+- `cargo test --test integration_qdrant -- --ignored` and `cargo test --lib -- --ignored vector::qdrant::tests::live` with a Qdrant at `ENGRAM_TEST_QDRANT`
 - `sh scripts/test-install.sh` after `cargo build`; `shellcheck install.sh build-lowmem.sh extension/pack.sh scripts/*.sh`
 
 ## Deviations from the manifest

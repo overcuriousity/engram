@@ -87,6 +87,10 @@ jobs:
       - run: cargo test --locked --test integration_qdrant -- --ignored
         env:
           ENGRAM_TEST_QDRANT: http://localhost:6333
+      # The cases every vector store must pass, against the one that needs a server.
+      - run: cargo test --locked --lib -- --ignored vector::qdrant::tests::live
+        env:
+          ENGRAM_TEST_QDRANT: http://localhost:6333
 
   browser:
     name: browser layout
@@ -101,7 +105,8 @@ jobs:
           node-version: '22'
       # `test_support::chrome` looks for playwright's build under ~/.cache/ms-playwright.
       - run: npx --yes playwright install --with-deps chromium-headless-shell
-      - run: cargo test --locked --lib -- --ignored
+      # The Qdrant conformance cases are ignored too, and belong to the job that has a Qdrant.
+      - run: cargo test --locked --lib -- --ignored --skip vector::qdrant::tests::live
       - run: cargo test --locked --test browser_ask -- --ignored
 
   sqlx:

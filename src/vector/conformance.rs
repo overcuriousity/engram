@@ -7,6 +7,13 @@ use crate::store::artifacts::ArtifactStatus;
 
 pub const DIM: usize = 3;
 
+/// A situation along one axis, at the one width a store keeps them in.
+pub fn situation(axis: usize) -> Vec<f32> {
+    let mut v = vec![0.0; crate::core::context::CTX_DIM];
+    v[axis] = 1.0;
+    v
+}
+
 pub fn point(
     id: &str,
     corpus: &str,
@@ -373,6 +380,34 @@ pub async fn facets_count_categories(s: &dyn VectorStore) {
     );
 }
 
+/// A chip's number is what choosing it would list.
+pub async fn facets_count_what_a_search_would_find(s: &dyn VectorStore) {
+    s.ensure_collection(DIM).await.unwrap();
+    s.upsert(vec![
+        point("a", "c", [1.0, 0.0, 0.0], &[], Some("note")),
+        point("b", "c", [1.0, 0.0, 0.0], &[], Some("note")),
+        point("c", "c", [1.0, 0.0, 0.0], &[], Some("note")),
+        point("d", "c", [1.0, 0.0, 0.0], &[], Some("note")),
+    ])
+    .await
+    .unwrap();
+    s.set_lifecycle("b", ArtifactStatus::Trashed, None)
+        .await
+        .unwrap();
+    s.set_lifecycle("c", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+    s.set_lifecycle("d", ArtifactStatus::Superseded, Some("a"))
+        .await
+        .unwrap();
+    let f = s.facets(5).await.unwrap();
+    assert_eq!(
+        f.categories.iter().map(|c| c.count).collect::<Vec<_>>(),
+        [1],
+        "the count includes notes no search shows"
+    );
+}
+
 pub async fn neighbours_exclude_the_artifact_itself(s: &dyn VectorStore) {
     s.ensure_collection(DIM).await.unwrap();
     s.upsert(vec![
@@ -395,20 +430,20 @@ pub async fn context_sets_match_on_the_nearest_situation(s: &dyn VectorStore) {
     ])
     .await
     .unwrap();
-    s.set_context_vectors("two", vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]])
+    s.set_context_vectors("two", vec![situation(0), situation(1)])
         .await
         .unwrap();
-    s.set_context_vectors("hidden", vec![vec![0.0, 1.0, 0.0]])
+    s.set_context_vectors("hidden", vec![situation(1)])
         .await
         .unwrap();
-    s.set_context_vectors("ghost", vec![vec![0.0, 1.0, 0.0]])
+    s.set_context_vectors("ghost", vec![situation(1)])
         .await
         .unwrap();
     s.set_lifecycle("hidden", ArtifactStatus::Deprecated, None)
         .await
         .unwrap();
     let got = s
-        .context_query(&[0.0, 1.0, 0.0], 10, &SearchFilter::default())
+        .context_query(&situation(1), 10, &SearchFilter::default())
         .await
         .unwrap();
     assert_eq!(ids(&got), ["two"]);
@@ -419,7 +454,7 @@ pub async fn context_sets_match_on_the_nearest_situation(s: &dyn VectorStore) {
     assert_eq!(got[0].similarity, None);
     s.set_context_vectors("two", vec![]).await.unwrap();
     assert!(
-        s.context_query(&[0.0, 1.0, 0.0], 10, &wide())
+        s.context_query(&situation(1), 10, &wide())
             .await
             .unwrap()
             .iter()
@@ -441,12 +476,12 @@ pub async fn deletes_take_everything_with_them(s: &dyn VectorStore) {
     ])
     .await
     .unwrap();
-    s.set_context_vectors("a", vec![vec![1.0, 0.0, 0.0]])
+    s.set_context_vectors("a", vec![situation(0)])
         .await
         .unwrap();
     s.delete_artifacts(&["a".into()]).await.unwrap();
     assert!(
-        s.context_query(&[1.0, 0.0, 0.0], 10, &wide())
+        s.context_query(&situation(0), 10, &wide())
             .await
             .unwrap()
             .is_empty()
@@ -457,6 +492,101 @@ pub async fn deletes_take_everything_with_them(s: &dyn VectorStore) {
     left.sort();
     assert_eq!(left, ["c"]);
     assert_eq!(s.count().await.unwrap(), 1);
+}
+
+/// An artifact may have no point yet, or none any more; a stamp or a status for it is not a
+/// failure, alone or in a batch.
+pub async fn writes_for_a_point_that_is_not_there_are_not_failures(s: &dyn VectorStore) {
+    s.ensure_collection(DIM).await.unwrap();
+    s.upsert(vec![point("a", "c", [1.0, 0.0, 0.0], &[], None)])
+        .await
+        .unwrap();
+    s.set_lifecycle("ghost", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+    s.set_last_verified_at("ghost", 5, true).await.unwrap();
+    s.touch(
+        &[Touch::retrieved("ghost", None), Touch::retrieved("a", None)],
+        9,
+    )
+    .await
+    .unwrap();
+    let mut gone = point("ghost", "c", [1.0, 0.0, 0.0], &[], None).payload;
+    gone.title = Some("renamed".into());
+    s.set_payload(&gone).await.unwrap();
+    assert_eq!(
+        s.count().await.unwrap(),
+        1,
+        "a write made the point it was about"
+    );
+    let a = &s.payloads_of(&["a".into()]).await.unwrap()["a"];
+    assert_eq!(
+        a.last_seen_at,
+        Some(9),
+        "the batch stopped at the missing point"
+    );
+}
+
+/// The situations say when a note was used, not what it says: a re-embed keeps them.
+pub async fn a_re_embed_keeps_the_situations(s: &dyn VectorStore) {
+    s.ensure_collection(DIM).await.unwrap();
+    s.upsert(vec![point("a", "c", [1.0, 0.0, 0.0], &[], None)])
+        .await
+        .unwrap();
+    s.set_context_vectors("a", vec![situation(1)])
+        .await
+        .unwrap();
+    s.upsert(vec![point("a", "c", [0.0, 1.0, 0.0], &[], None)])
+        .await
+        .unwrap();
+    let got = s.context_query(&situation(1), 10, &wide()).await.unwrap();
+    assert_eq!(
+        ids(&got),
+        ["a"],
+        "the re-embed dropped what the context sweep had learned"
+    );
+}
+
+pub async fn situations_are_found_inside_the_filter(s: &dyn VectorStore) {
+    s.ensure_collection(DIM).await.unwrap();
+    s.upsert(vec![
+        point("in", "c1", [1.0, 0.0, 0.0], &["t"], Some("procedure")),
+        point("out", "c2", [1.0, 0.0, 0.0], &[], Some("reference")),
+    ])
+    .await
+    .unwrap();
+    for id in ["in", "out"] {
+        s.set_context_vectors(id, vec![situation(0)]).await.unwrap();
+    }
+    for filter in [
+        SearchFilter {
+            tags: vec!["t".into()],
+            ..wide()
+        },
+        SearchFilter {
+            category: Some("procedure".into()),
+            ..wide()
+        },
+        SearchFilter {
+            corpus_id: Some("c1".into()),
+            ..wide()
+        },
+    ] {
+        let got = s.context_query(&situation(0), 10, &filter).await.unwrap();
+        assert_eq!(ids(&got), ["in"], "{filter:?}");
+    }
+}
+
+/// A vector of another width cannot be compared with anything, and saying so beats an empty
+/// list that reads as "nothing matches". Not in `suite!`: the stores that hold a base refuse;
+/// the in-memory one compares at zero, which tests with short vectors lean on.
+pub async fn a_query_of_another_width_is_refused(s: &dyn VectorStore) {
+    s.ensure_collection(DIM).await.unwrap();
+    s.upsert(vec![point("a", "c", [1.0, 0.0, 0.0], &[], None)])
+        .await
+        .unwrap();
+    let got = s.search(&[1.0, 0.0, 0.0, 0.0], &none(), 10, &wide()).await;
+    assert!(got.is_err(), "{:?}", got.map(|h| h.len()));
 }
 
 pub async fn a_sample_is_capped_and_repeatable(s: &dyn VectorStore) {
@@ -486,12 +616,42 @@ macro_rules! suite {
             resurface_offers_the_old_and_unseen, apply_lifecycle_writes_a_batch,
             facets_count_categories, neighbours_exclude_the_artifact_itself,
             context_sets_match_on_the_nearest_situation, deletes_take_everything_with_them,
-            a_sample_is_capped_and_repeatable
+            a_sample_is_capped_and_repeatable,
+            writes_for_a_point_that_is_not_there_are_not_failures,
+            a_re_embed_keeps_the_situations, situations_are_found_inside_the_filter,
+            facets_count_what_a_search_would_find
         );
     };
     (@each $make:expr; $($name:ident),+) => {
         $(
             #[tokio::test]
+            async fn $name() {
+                let held = $make.await;
+                $crate::vector::conformance::$name(&*held).await;
+            }
+        )+
+    };
+    // For a store that needs a server: the same cases, run only where one is named.
+    (ignored: $make:expr) => {
+        $crate::vector::conformance::suite!(@ignored $make;
+            search_ranks_by_cosine, limit_is_respected, zero_vectors_do_not_produce_nan,
+            equal_scores_order_by_id, filters_narrow, hidden_statuses_stay_out_unless_asked_for,
+            a_trashed_artifact_is_excluded_until_restored,
+            a_re_embed_keeps_the_stamps, set_payload_merges_and_leaves_the_vector,
+            touch_counts_only_retrievals, stale_candidates_need_a_stamp,
+            resurface_offers_the_old_and_unseen, apply_lifecycle_writes_a_batch,
+            facets_count_categories, neighbours_exclude_the_artifact_itself,
+            context_sets_match_on_the_nearest_situation, deletes_take_everything_with_them,
+            a_sample_is_capped_and_repeatable,
+            writes_for_a_point_that_is_not_there_are_not_failures,
+            a_re_embed_keeps_the_situations, situations_are_found_inside_the_filter,
+            facets_count_what_a_search_would_find
+        );
+    };
+    (@ignored $make:expr; $($name:ident),+) => {
+        $(
+            #[tokio::test]
+            #[ignore]
             async fn $name() {
                 let held = $make.await;
                 $crate::vector::conformance::$name(&*held).await;

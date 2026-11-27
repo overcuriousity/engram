@@ -352,6 +352,8 @@ struct ScrollResult {
 /// `None` means the key is absent.
 #[derive(Debug, Clone, Default)]
 struct StoredBookkeeping {
+    /// The situations: a point write replaces every vector, and these are not the embed's.
+    ctx: Option<Vec<Vec<f32>>>,
     last_seen_at: Option<i64>,
     hit_count: Option<i64>,
     status: Option<ArtifactStatus>,
@@ -617,20 +619,8 @@ impl QdrantVectors {
         &self,
         points: &[VectorPoint],
     ) -> Result<std::collections::HashMap<String, StoredBookkeeping>> {
-        let wanted: Vec<&VectorPoint> = points
-            .iter()
-            .filter(|p| {
-                p.payload.last_seen_at.is_none()
-                    || p.payload.hit_count.is_none()
-                    || p.payload.status.is_none()
-                    || p.payload.last_verified_at.is_none()
-                    || p.payload.superseded_by.is_none()
-            })
-            .collect();
-        if wanted.is_empty() {
-            return Ok(Default::default());
-        }
-        let by_uuid: std::collections::HashMap<String, &str> = wanted
+        // Every point: even a payload that carries all its stamps would lose its context set.
+        let by_uuid: std::collections::HashMap<String, &str> = points
             .iter()
             .map(|p| {
                 (
@@ -650,7 +640,7 @@ impl QdrantVectors {
                         "last_seen_at", "hit_count",
                         "status", "last_verified_at", "superseded_by",
                     ],
-                    "with_vector": false,
+                    "with_vector": [CTX],
                 })),
             )
             .await?;
@@ -664,6 +654,7 @@ impl QdrantVectors {
             out.insert(
                 (*artifact_id).to_string(),
                 StoredBookkeeping {
+                    ctx: ctx_of(&p.vector),
                     last_seen_at: p.payload.get("last_seen_at").and_then(Value::as_i64),
                     hit_count: p.payload.get("hit_count").and_then(Value::as_i64),
                     status: p
@@ -689,7 +680,12 @@ impl QdrantVectors {
             .call(
                 Method::POST,
                 &format!("/collections/{}/facet", self.alias),
-                Some(json!({ "key": key, "limit": limit })),
+                // What a search with no filter would list: a chip's number is what choosing it
+                // shows.
+                Some(match build_filter(&SearchFilter::default()) {
+                    Some(shown) => json!({ "key": key, "limit": limit, "filter": shown }),
+                    None => json!({ "key": key, "limit": limit }),
+                }),
             )
             .await
             .map_err(|e| Error::Vector(format!("facet on {key}: {e}")))?;
@@ -811,6 +807,12 @@ impl QdrantVectors {
     }
 }
 
+/// One point, named by a filter: by `points` a batch 404s on an id that is not there and
+/// leaves the operations after it undone; a filter that matches nothing is no failure.
+fn only(uuid: &str) -> Value {
+    json!({ "must": [ { "has_id": [uuid] } ] })
+}
+
 /// Foreign points (copied or operator-inserted) are skipped with a log line rather than failing search.
 fn hits_of(res: QueryResult) -> Vec<SearchHit> {
     let mut out = Vec::with_capacity(res.points.len());
@@ -828,6 +830,13 @@ fn hits_of(res: QueryResult) -> Vec<SearchHit> {
             ),
         }
     }
+    // Qdrant orders equal scores as it likes; by id, so a page reads the same twice and as the
+    // other stores give it.
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.payload.artifact_id.cmp(&b.payload.artifact_id))
+    });
     out
 }
 
@@ -1012,6 +1021,9 @@ impl VectorStore for QdrantVectors {
             if let Some(sp) = sparse_body(&p.sparse) {
                 vector[SPARSE] = sp;
             }
+            if let Some(set) = old.and_then(|s| s.ctx.as_ref()) {
+                vector[CTX] = json!(set);
+            }
             body.push(json!({
                 "id": point_uuid(&p.payload.artifact_id),
                 "vector": vector,
@@ -1023,8 +1035,9 @@ impl VectorStore for QdrantVectors {
 
     async fn set_payload(&self, payload: &VectorPayload) -> Result<()> {
         let body = serde_json::to_value(payload).map_err(|e| Error::Vector(e.to_string()))?;
-        let _: Value = self
-            .call(
+        // Absent is not a failure, as in `set_lifecycle`: the embed writes the whole payload.
+        let _: Option<Value> = self
+            .call_absent_point_as_none(
                 Method::POST,
                 &format!("/collections/{}/points/payload?wait=true", self.alias),
                 Some(json!({
@@ -1063,8 +1076,9 @@ impl VectorStore for QdrantVectors {
         at: i64,
         reset_hits: bool,
     ) -> Result<()> {
-        let _: Value = self
-            .call(
+        // Absent is not a failure, as in `set_lifecycle`.
+        let _: Option<Value> = self
+            .call_absent_point_as_none(
                 Method::POST,
                 &format!("/collections/{}/points/payload?wait=true", self.alias),
                 Some(json!({
@@ -1092,7 +1106,7 @@ impl VectorStore for QdrantVectors {
                     json!({
                         "set_payload": {
                             "payload": payload,
-                            "points": [ point_uuid(&r.artifact_id) ],
+                            "filter": only(&point_uuid(&r.artifact_id)),
                         }
                     })
                 })
@@ -1482,7 +1496,7 @@ impl VectorStore for QdrantVectors {
                 json!({
                     "set_payload": {
                         "payload": payload,
-                        "points": [uuid],
+                        "filter": only(uuid),
                     }
                 })
             })
@@ -1981,6 +1995,37 @@ impl QdrantVectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cases every store must pass, against a real Qdrant at `ENGRAM_TEST_QDRANT`:
+    /// `cargo test --lib -- --ignored vector::qdrant::tests::live`.
+    mod live {
+        async fn fresh() -> Box<crate::vector::qdrant::QdrantVectors> {
+            let cfg = crate::config::VectorConfig {
+                url: std::env::var("ENGRAM_TEST_QDRANT")
+                    .unwrap_or_else(|_| "http://localhost:6333".into()),
+                collection: format!(
+                    "engram_conforms_{}",
+                    crate::store::new_id().replace('-', "")
+                ),
+                ..crate::config::Config::test_default().vector
+            };
+            let v = crate::vector::qdrant::QdrantVectors::connect(&cfg)
+                .await
+                .unwrap();
+            crate::vector::VectorStore::ensure_collection(&v, crate::vector::conformance::DIM)
+                .await
+                .unwrap();
+            Box::new(v)
+        }
+
+        crate::vector::conformance::suite!(ignored: fresh());
+
+        #[tokio::test]
+        #[ignore]
+        async fn a_query_of_another_width_is_refused() {
+            crate::vector::conformance::a_query_of_another_width_is_refused(&*fresh().await).await;
+        }
+    }
 
     #[test]
     fn the_collection_carries_a_context_multivector() {
