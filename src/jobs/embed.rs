@@ -530,10 +530,6 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     tracing::info!(artifact_id = %chunk.id, parts = parts.len(), "split oversize chunk into siblings");
 
     let base = chunk.ordinal;
-    // Make room first: `base * 1000 + i` sorts siblings after later chunks.
-    core.store
-        .make_room_after(corpus_id, base, parts.len() as i64 - 1)
-        .await?;
     let new: Vec<NewArtifact> = parts
         .iter()
         .enumerate()
@@ -551,8 +547,10 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
         })
         .collect();
 
-    let inserted = core.store.insert_artifacts(corpus_id, &new).await?;
-    core.store.delete_artifact(&chunk.id).await?;
+    let inserted = core
+        .store
+        .replace_with_siblings(corpus_id, &chunk.id, base, &new)
+        .await?;
     core.vectors
         .delete_artifacts(std::slice::from_ref(&chunk.id))
         .await?;

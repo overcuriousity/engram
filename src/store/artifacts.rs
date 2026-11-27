@@ -561,6 +561,50 @@ impl Store {
         provenance: Provenance,
     ) -> Result<Vec<Chunk>> {
         let mut tx = self.pool.begin().await?;
+        let out = insert_into(&mut tx, corpus_id, chunks, provenance).await?;
+        tx.commit().await?;
+        Ok(out)
+    }
+
+    /// One transaction: a split that fails half-way must leave the parent alone, or its retry
+    /// splits the parent again and the text is in the base twice.
+    pub async fn replace_with_siblings(
+        &self,
+        corpus_id: &str,
+        parent: &str,
+        ordinal: i64,
+        parts: &[NewArtifact],
+    ) -> Result<Vec<Chunk>> {
+        let mut tx = self.pool.begin().await?;
+        // Make room first: `base * 1000 + i` sorts siblings after later chunks.
+        let by = parts.len() as i64 - 1;
+        sqlx::query!(
+            "UPDATE artifacts SET ordinal = ordinal + ? WHERE corpus_id = ? AND ordinal > ?",
+            by,
+            corpus_id,
+            ordinal
+        )
+        .execute(&mut *tx)
+        .await?;
+        let inserted = insert_into(&mut tx, corpus_id, parts, Provenance::Captured).await?;
+        let gone = sqlx::query!("DELETE FROM artifacts WHERE id = ?", parent)
+            .execute(&mut *tx)
+            .await?;
+        if gone.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        tx.commit().await?;
+        Ok(inserted)
+    }
+}
+
+async fn insert_into(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    corpus_id: &str,
+    chunks: &[NewArtifact],
+    provenance: Provenance,
+) -> Result<Vec<Chunk>> {
+    {
         let mut out = Vec::with_capacity(chunks.len());
         for nc in chunks {
             let created_at = now();
@@ -610,14 +654,15 @@ impl Store {
                 c.last_verified_at,
                 c.created_at
             )
-                .execute(&mut *tx)
+                .execute(&mut **tx)
             .await?;
             out.push(c);
         }
-        tx.commit().await?;
         Ok(out)
     }
+}
 
+impl Store {
     pub async fn get_artifact(&self, id: &str) -> Result<Chunk> {
         let row = sqlx::query_as!(
             crate::store::artifacts::ArtifactRow,
@@ -1054,18 +1099,6 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.id).collect())
     }
 
-    /// Chunks inserted into the gap keep reading order without renumbering the source.
-    pub async fn make_room_after(&self, corpus_id: &str, ordinal: i64, by: i64) -> Result<()> {
-        sqlx::query!(
-            "UPDATE artifacts SET ordinal = ordinal + ? WHERE corpus_id = ? AND ordinal > ?",
-            by,
-            corpus_id,
-            ordinal
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
 
     /// Ordering by window, then by within-window number, reproduces reading order.
     pub async fn renumber_artifacts(&self, corpus_id: &str) -> Result<()> {
@@ -1814,6 +1847,40 @@ mod tests {
             tags: vec!["forensics".into(), "windows".into()],
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_split_that_cannot_remove_its_parent_leaves_no_siblings_behind() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "one"), nc(1, "two")])
+            .await
+            .unwrap();
+
+        // The parent is gone by the time the split lands (a retry after a half-done split).
+        let lost = s
+            .replace_with_siblings(&src.id, "no-such-parent", 0, &[nc(0, "o"), nc(1, "ne")])
+            .await;
+        assert!(matches!(lost, Err(Error::NotFound)));
+        let left = s.artifacts_for_corpus(&src.id).await.unwrap();
+        let texts: Vec<&str> = left.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["one", "two"], "the text is in the base twice");
+        assert_eq!(left[1].ordinal, 1, "room was made for siblings that never came");
+
+        let kept = s
+            .replace_with_siblings(&src.id, &made[0].id, 0, &[nc(0, "o"), nc(1, "ne")])
+            .await
+            .unwrap();
+        assert_eq!(kept.len(), 2);
+        let now: Vec<String> = s
+            .artifacts_for_corpus(&src.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert_eq!(now, ["o", "ne", "two"]);
     }
 
     #[tokio::test]
