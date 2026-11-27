@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET stage = 'from-a-newer-build', seq = -1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "377da2d63d2de10c2129d6260d5ea6328a6e8cebeeb4c66647bb3ae24d9a11df"
+}

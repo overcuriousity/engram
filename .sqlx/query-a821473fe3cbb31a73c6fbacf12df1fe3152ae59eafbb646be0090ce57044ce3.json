@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pair_grants WHERE subject = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a821473fe3cbb31a73c6fbacf12df1fe3152ae59eafbb646be0090ce57044ce3"
+}

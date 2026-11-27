@@ -737,10 +737,9 @@ impl Store {
         Ok(oldest.map(|t| (now() - t).max(0)))
     }
 
-    /// Not any pending row (periodic sweeps park far out) and not `class = 0` (aged sweeps).
-    /// Counts reading stages that are running and not stuck, pending and due, or retrying with
-    /// attempts left: one parked at the ceiling would say "reading" for as long as it is refused.
-    /// An embed counts for a corpus only; an artifact's is a merge, a condensation or an edit.
+    /// Reading stages running and not stuck, pending and due, or retrying with attempts left:
+    /// not any pending row (sweeps park far out), not one parked at the ceiling. An embed counts
+    /// for a corpus only; an artifact's is a merge, a condensation or an edit.
     pub async fn capture_being_read(&self) -> Result<bool> {
         // Built from the stage list, so a new stage answers `reads_a_capture`.
         let stages: Vec<&str> = Stage::ALL

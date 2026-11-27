@@ -22,7 +22,7 @@ fn hash_secret(secret: &str) -> String {
 fn verify_fast(secret: &str, stored: &str) -> Option<bool> {
     let want = stored.strip_prefix(FAST)?.as_bytes();
     let hashed = hash_secret(secret);
-    let got = hashed[FAST.len()..].as_bytes();
+    let got = &hashed.as_bytes()[FAST.len()..];
     // No early exit on the first differing byte.
     let differ = want.len() != got.len()
         || want.iter().zip(got).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0;
