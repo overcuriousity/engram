@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_pairs SET moved_at = 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "09773ab2c4b4a5d642e5f4f88daf4dc0260780565b5b8c00452db723a79eff04"
+}

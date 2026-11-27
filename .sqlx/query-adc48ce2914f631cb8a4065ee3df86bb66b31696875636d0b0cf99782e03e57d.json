@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO moment_carries (moment_id, from_id, to_id, at)\n             SELECT m.id, ?, ?, ? FROM moments m\n              WHERE m.artifact_id = ? AND m.done_at IS NULL\n                AND NOT EXISTS (SELECT 1 FROM moments w\n                                 WHERE w.artifact_id = ?\n                                   AND w.kind = m.kind\n                                   AND w.at IS m.at\n                                   AND w.rule IS m.rule\n                                   AND w.done_at IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "adc48ce2914f631cb8a4065ee3df86bb66b31696875636d0b0cf99782e03e57d"
+}

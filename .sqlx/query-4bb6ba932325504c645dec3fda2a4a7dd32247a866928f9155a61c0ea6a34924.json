@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS \"id!\" FROM artifact_sources s\n                 JOIN artifacts a ON a.id = s.child_id\n                WHERE s.root_id = ? AND a.provenance = 'synthesized' AND a.status = 'active'\n                  AND EXISTS (SELECT 1 FROM json_each(a.cues) WHERE value = ?)\n                ORDER BY a.created_at DESC, a.id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4bb6ba932325504c645dec3fda2a4a7dd32247a866928f9155a61c0ea6a34924"
+}

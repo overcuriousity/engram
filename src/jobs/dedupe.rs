@@ -183,10 +183,9 @@ async fn asked_already(core: &Core, p: &ArtifactPair, a: &Chunk, b: &Chunk) -> R
     }))
 }
 
-/// A moved pair carries the cosine of the members it had before, and that number decides
-/// whether the base may act alone and is what the review line is tuned on. Measured again
-/// from the vectors; where one is missing, the pair waits for a person. A link's pair has no
-/// cosine (`score` zero) and keeps none.
+/// A moved pair's cosine is its former members', and it gates acting alone and tunes the review
+/// line: measured again from the vectors, and where one is missing the pair waits for a person.
+/// A link's pair has no cosine (`score` zero) and keeps none.
 async fn remeasured(
     core: &Core,
     mut p: ArtifactPair,

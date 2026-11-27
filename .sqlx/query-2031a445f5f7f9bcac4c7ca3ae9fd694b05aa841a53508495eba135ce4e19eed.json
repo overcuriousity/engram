@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM moment_carries WHERE to_id = ? AND from_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2031a445f5f7f9bcac4c7ca3ae9fd694b05aa841a53508495eba135ce4e19eed"
+}

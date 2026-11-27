@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE eval_runs SET diff = '[]'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "653acf747df4393795087d4b1f52a2114174ba5dc2e2ba002300b97b60cb30eb"
+}

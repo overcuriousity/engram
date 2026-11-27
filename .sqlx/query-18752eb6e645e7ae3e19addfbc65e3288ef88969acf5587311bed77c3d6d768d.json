@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM gap_coverage",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "18752eb6e645e7ae3e19addfbc65e3288ef88969acf5587311bed77c3d6d768d"
+}
