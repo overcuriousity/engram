@@ -681,7 +681,15 @@ impl Core {
                 })
                 .await;
         }
-        if image::guess_format(&bytes).is_ok() {
+        // The three formats read here have magics no prose opens with. The others include
+        // two-letter ones (`BM`, `P1`..`P7`) that begin ordinary sentences, so those are an
+        // image only where the bytes are not text; the image door then names the format.
+        let is_image = match image::guess_format(&bytes) {
+            Ok(f) if crate::core::image::reads(f) => true,
+            Ok(_) => std::str::from_utf8(&bytes).map_or(true, |t| t.contains('\0')),
+            Err(_) => false,
+        };
+        if is_image {
             return self
                 .ingest_image(ImageCapture {
                     bytes,
@@ -1889,6 +1897,39 @@ mod tests {
         let d = store_drift(&ids(&["a", "b", "c"]), &ids(&["a", "c"]), &ids(&["a"]));
         assert_eq!(d.missing_points, ids(&["c"]));
         assert!(d.orphan_points.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prose_that_opens_like_an_image_header_is_still_prose() {
+        let core = test_core().await;
+        // `BM` is a bitmap's magic and `P1`..`P7` a netpbm's: two bytes that also open a sentence.
+        for text in [
+            "BMW i3: the 12 V battery is under the bonnet.",
+            "P1 incident: the mount failed at boot.",
+        ] {
+            let out = core
+                .ingest_file(
+                    text.as_bytes().to_vec(),
+                    Some("notes.txt".into()),
+                    None,
+                    None,
+                    "web",
+                    Default::default(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{text:?} was refused: {e}"));
+            let stored = core.store.get_corpus(&out.id).await.unwrap();
+            assert_eq!(stored.raw_text.trim(), text);
+        }
+        // A real bitmap is still named for what it is.
+        let mut bitmap = b"BM".to_vec();
+        bitmap.extend_from_slice(&[0x36, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xfe, 0x80]);
+        let refused = core
+            .ingest_file(bitmap, None, None, None, "web", Default::default())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(refused.to_string().contains("bmp"), "{refused}");
     }
 
     #[tokio::test]
