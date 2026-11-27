@@ -895,7 +895,10 @@ mod tests {
             .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
-        assert_eq!(row.state, "pending", "left running, as if someone still held it");
+        assert_eq!(
+            row.state, "pending",
+            "left running, as if someone still held it"
+        );
         assert!(row.last_error.unwrap_or_default().contains("panicked"));
     }
 
@@ -908,7 +911,9 @@ mod tests {
             .unwrap();
         let job = core.store.claim_job().await.unwrap().unwrap();
 
-        settle(&core, job, false, Err(Error::NotFound)).await.unwrap();
+        settle(&core, job, false, Err(Error::NotFound))
+            .await
+            .unwrap();
 
         assert!(
             pending_run_after(&core, Stage::Retention).await.is_some(),
@@ -941,13 +946,19 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         release.notify_one();
         worker.await.unwrap();
-        assert!(finished.load(Ordering::SeqCst), "the unit was dropped mid-run");
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the unit was dropped mid-run"
+        );
     }
 
     #[tokio::test]
     async fn a_long_unit_keeps_its_claim_fresh_while_it_runs() {
         let core = test_core().await;
-        core.store.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
+        core.store
+            .enqueue(Stage::Embed, "artifact", "a-1")
+            .await
+            .unwrap();
         let j = core.store.claim_job().await.unwrap().unwrap();
         let stale = crate::store::now() - 3600;
         sqlx::query!("UPDATE jobs SET claimed_at = ? WHERE id = ?", stale, j.id)
@@ -955,16 +966,24 @@ mod tests {
             .await
             .unwrap();
 
-        beating(&core.store.control, j.id, Duration::from_millis(20), async {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        })
+        beating(
+            &core.store.control,
+            j.id,
+            Duration::from_millis(20),
+            async {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            },
+        )
         .await;
 
         let at = sqlx::query_scalar!("SELECT claimed_at FROM jobs WHERE id = ?", j.id)
             .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
-        assert!(at.unwrap_or(0) > stale, "nothing refreshed the claim during the run");
+        assert!(
+            at.unwrap_or(0) > stale,
+            "nothing refreshed the claim during the run"
+        );
     }
 
     #[tokio::test]

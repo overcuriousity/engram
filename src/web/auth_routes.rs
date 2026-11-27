@@ -75,7 +75,10 @@ async fn login_page(
                     .await
                     .map_err(|e| Error::Store(format!("session: {e}")))?;
                 if !st.auth.pending.put(pending) {
-                    let busy = (StatusCode::TOO_MANY_REQUESTS, "too many sign-ins in progress");
+                    let busy = (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "too many sign-ins in progress",
+                    );
                     return Ok(busy.into_response());
                 }
                 return Ok(Redirect::to(&url).into_response());
@@ -710,7 +713,10 @@ mod tests {
                 refused += 1;
             }
         }
-        assert_eq!(refused, 10, "each address got its own five guesses, without end");
+        assert_eq!(
+            refused, 10,
+            "each address got its own five guesses, without end"
+        );
     }
 
     #[tokio::test]

@@ -494,7 +494,10 @@ mod tests {
             .fetch_one(&c.pool)
             .await
             .unwrap();
-        assert_eq!(left, 0, "a code claimed now would bring the account back: {code}");
+        assert_eq!(
+            left, 0,
+            "a code claimed now would bring the account back: {code}"
+        );
     }
 
     #[tokio::test]

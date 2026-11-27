@@ -1099,7 +1099,6 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.id).collect())
     }
 
-
     /// Ordering by window, then by within-window number, reproduces reading order.
     pub async fn renumber_artifacts(&self, corpus_id: &str) -> Result<()> {
         let rows = sqlx::query!(
@@ -1866,7 +1865,10 @@ mod tests {
         let left = s.artifacts_for_corpus(&src.id).await.unwrap();
         let texts: Vec<&str> = left.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, ["one", "two"], "the text is in the base twice");
-        assert_eq!(left[1].ordinal, 1, "room was made for siblings that never came");
+        assert_eq!(
+            left[1].ordinal, 1,
+            "room was made for siblings that never came"
+        );
 
         let kept = s
             .replace_with_siblings(&src.id, &made[0].id, 0, &[nc(0, "o"), nc(1, "ne")])

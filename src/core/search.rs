@@ -2233,9 +2233,15 @@ mod tests {
         core.learn.enabled = false;
         let before = crate::store::now() - 1;
         core.search(&q("mount"), Door::Judge).await.unwrap();
-        assert!(!core.used_since(before), "the base's own judging keeps it awake");
+        assert!(
+            !core.used_since(before),
+            "the base's own judging keeps it awake"
+        );
         core.search(&q("mount"), Door::Ui).await.unwrap();
-        assert!(core.used_since(before), "a search left no trace of someone being there");
+        assert!(
+            core.used_since(before),
+            "a search left no trace of someone being there"
+        );
     }
 
     #[tokio::test]

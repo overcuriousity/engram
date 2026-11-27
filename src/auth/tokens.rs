@@ -24,8 +24,8 @@ fn verify_fast(secret: &str, stored: &str) -> Option<bool> {
     let hashed = hash_secret(secret);
     let got = &hashed.as_bytes()[FAST.len()..];
     // No early exit on the first differing byte.
-    let differ = want.len() != got.len()
-        || want.iter().zip(got).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0;
+    let differ =
+        want.len() != got.len() || want.iter().zip(got).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0;
     Some(!differ)
 }
 

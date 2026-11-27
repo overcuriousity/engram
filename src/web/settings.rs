@@ -562,7 +562,8 @@ mod tests {
         let left = core.store.control.list_tokens("user-1").await.unwrap();
         assert_eq!(left.len(), 2, "a leaked token minted itself a successor");
         assert!(
-            left.iter().any(|t| t.id == spare_id && t.revoked_at.is_some()),
+            left.iter()
+                .any(|t| t.id == spare_id && t.revoked_at.is_some()),
             "a leaked token brought a revoked one back"
         );
     }

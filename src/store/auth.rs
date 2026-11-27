@@ -94,9 +94,13 @@ impl Control {
 
     /// A hash from before, replaced by the fast one once its secret has been seen.
     pub async fn set_token_hash(&self, id: &str, hash: &str) -> Result<()> {
-        sqlx::query!("UPDATE api_tokens SET token_hash = ? WHERE id = ?", hash, id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE api_tokens SET token_hash = ? WHERE id = ?",
+            hash,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

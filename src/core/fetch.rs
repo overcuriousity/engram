@@ -292,7 +292,10 @@ mod tests {
             (format!("http://127.0.0.1:{port}/"), closed.clone()),
             (format!("http://localhost:{port}/"), closed.clone()),
             (format!("http://[::1]:{port}/"), closed),
-            (format!("http://127.0.0.1:{port}/"), CaptureConfig::default()),
+            (
+                format!("http://127.0.0.1:{port}/"),
+                CaptureConfig::default(),
+            ),
         ] {
             let u = url::Url::parse(&target).unwrap();
             let got = fetch(&u, &cfg).await;
@@ -307,7 +310,12 @@ mod tests {
     #[test]
     fn a_hop_that_names_an_inward_address_outright_is_recognised() {
         // A name goes through the resolver on every hop; a literal address never does.
-        for u in ["http://127.0.0.1/x", "http://[::1]:8080/", "https://10.0.0.5/", "http://[::ffff:192.168.0.1]/"] {
+        for u in [
+            "http://127.0.0.1/x",
+            "http://[::1]:8080/",
+            "https://10.0.0.5/",
+            "http://[::ffff:192.168.0.1]/",
+        ] {
             assert!(names_inward(&url::Url::parse(u).unwrap()), "{u}");
         }
         for u in ["http://example.org/", "http://93.184.216.34/"] {
@@ -318,13 +326,34 @@ mod tests {
     #[test]
     fn inward_is_everything_that_is_not_the_public_internet() {
         for ip in [
-            "127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.5", "169.254.169.254",
-            "100.64.0.1", "0.0.0.0", "255.255.255.255", "224.0.0.1", "::1", "::", "fc00::1", "fd12::1",
-            "fe80::1", "ff02::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.5",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.1",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
         ] {
             assert!(inward(ip.parse().unwrap()), "{ip} counts as public");
         }
-        for ip in ["93.184.216.34", "172.32.0.1", "100.128.0.1", "2606:4700::1111", "::ffff:8.8.8.8"] {
+        for ip in [
+            "93.184.216.34",
+            "172.32.0.1",
+            "100.128.0.1",
+            "2606:4700::1111",
+            "::ffff:8.8.8.8",
+        ] {
             assert!(!inward(ip.parse().unwrap()), "{ip} counts as inward");
         }
     }

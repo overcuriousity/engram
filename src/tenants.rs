@@ -654,7 +654,10 @@ mod tests {
             std::sync::Arc::ptr_eq(&a.core.lifecycle_lock, &again.core.lifecycle_lock),
             "a repair pass and a request lock two different things"
         );
-        assert!(std::sync::Arc::ptr_eq(&a.core.corpus_locks, &again.core.corpus_locks));
+        assert!(std::sync::Arc::ptr_eq(
+            &a.core.corpus_locks,
+            &again.core.corpus_locks
+        ));
     }
 
     #[tokio::test]

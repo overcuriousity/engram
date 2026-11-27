@@ -75,12 +75,10 @@ pub enum Target {
 fn unified(entry: &serde_json::Value) -> Option<Target> {
     let endpoint = entry["endpoint"].as_str().filter(|e| !e.is_empty())?;
     let keys = match (entry["p256dh"].as_str(), entry["auth"].as_str()) {
-        (Some(p256dh), Some(auth)) if !p256dh.is_empty() && !auth.is_empty() => {
-            Some(WebPushKeys {
-                p256dh: p256dh.into(),
-                auth: auth.into(),
-            })
-        }
+        (Some(p256dh), Some(auth)) if !p256dh.is_empty() && !auth.is_empty() => Some(WebPushKeys {
+            p256dh: p256dh.into(),
+            auth: auth.into(),
+        }),
         _ => None,
     };
     Some(Target::UnifiedPush {
@@ -91,7 +89,9 @@ fn unified(entry: &serde_json::Value) -> Option<Target> {
 
 fn same_endpoint(a: &Target, b: &Target) -> bool {
     match (a, b) {
-        (Target::UnifiedPush { endpoint: x, .. }, Target::UnifiedPush { endpoint: y, .. }) => x == y,
+        (Target::UnifiedPush { endpoint: x, .. }, Target::UnifiedPush { endpoint: y, .. }) => {
+            x == y
+        }
         _ => false,
     }
 }
@@ -115,7 +115,10 @@ async fn forget_endpoint(core: &Core, endpoint: &str) -> Result<()> {
         return Ok(());
     };
     let mut changed = false;
-    if map.get("unifiedpush").is_some_and(|u| u["endpoint"] == endpoint) {
+    if map
+        .get("unifiedpush")
+        .is_some_and(|u| u["endpoint"] == endpoint)
+    {
         map.remove("unifiedpush");
         changed = true;
     }
@@ -149,7 +152,8 @@ pub fn notify_targets(notify: &serde_json::Value) -> Vec<Target> {
     // The endpoint typed into Settings, then one per paired device; an endpoint named twice
     // is pushed to once.
     let devices = notify["devices"].as_object();
-    let entries = std::iter::once(&notify["unifiedpush"]).chain(devices.into_iter().flatten().map(|(_, d)| d));
+    let entries = std::iter::once(&notify["unifiedpush"])
+        .chain(devices.into_iter().flatten().map(|(_, d)| d));
     for entry in entries {
         let Some(target) = unified(entry) else {
             continue;
@@ -415,7 +419,14 @@ pub async fn notify_now(core: &Core, title: &str, message: &str) -> Result<()> {
         return Ok(());
     }
     let msg = Message::notice(title, message, core.clock.now());
-    deliver(core, &http_client()?, &Sender::load(core).await?, &targets, &msg).await
+    deliver(
+        core,
+        &http_client()?,
+        &Sender::load(core).await?,
+        &targets,
+        &msg,
+    )
+    .await
 }
 
 /// Moments are marked once any channel took the message: a retry would duplicate on the channel
@@ -431,7 +442,14 @@ pub async fn run(core: &Core) -> Result<()> {
         return Ok(());
     }
     let msg = Message::due(&owed, now);
-    deliver(core, &http_client()?, &Sender::load(core).await?, &targets, &msg).await?;
+    deliver(
+        core,
+        &http_client()?,
+        &Sender::load(core).await?,
+        &targets,
+        &msg,
+    )
+    .await?;
     let ids: Vec<String> = owed.iter().map(|r| r.moment.id.clone()).collect();
     // The message is out, so the mark is the fragile step: a `?` retry would deliver the whole
     // batch again. Retried until it sticks; the cause is a brief writer lock.
@@ -1129,7 +1147,12 @@ mod tests {
 
         notify_now(&core, "t", "m").await.unwrap();
 
-        let left = core.store.control.notify(&core.store.subject).await.unwrap();
+        let left = core
+            .store
+            .control
+            .notify(&core.store.subject)
+            .await
+            .unwrap();
         assert_eq!(
             notify_targets(&left),
             vec![Target::UnifiedPush {

@@ -1742,7 +1742,10 @@ mod tests {
             end_line: 2,
             text: "raw",
         };
-        core.store.upsert_segments(&src_id, &[window]).await.unwrap();
+        core.store
+            .upsert_segments(&src_id, &[window])
+            .await
+            .unwrap();
         let failed = crate::store::segments::SegmentState::Failed;
         core.store
             .set_segment_state(&src_id, 0, failed, Some("refused"))

@@ -583,23 +583,25 @@ mod tests {
             b64.encode("{}")
         );
         let err = client.verify_jwt(&token).await.unwrap_err();
-        assert_ne!(
-            err.status(),
-            axum::http::StatusCode::BAD_REQUEST,
-            "{err}"
-        );
+        assert_ne!(err.status(), axum::http::StatusCode::BAD_REQUEST, "{err}");
     }
 
     #[test]
     fn a_subject_taken_off_the_list_is_no_longer_let_in() {
         assert!(still_allowed(&cfg(&["sub-1"], &[]), "sub-1"));
         assert!(!still_allowed(&cfg(&["sub-1"], &[]), "sub-2"));
-        assert!(!still_allowed(&cfg(&[], &[]), "sub-1"), "empty lists, registration shut");
+        assert!(
+            !still_allowed(&cfg(&[], &[]), "sub-1"),
+            "empty lists, registration shut"
+        );
         let mut open = cfg(&[], &[]);
         open.open_registration = true;
         assert!(still_allowed(&open, "sub-1"));
         // Groups arrive only at login, so a group list cannot say who came in through it.
-        assert!(still_allowed(&cfg_with_groups(&["sub-1"], &[], &["staff"]), "sub-2"));
+        assert!(still_allowed(
+            &cfg_with_groups(&["sub-1"], &[], &["staff"]),
+            "sub-2"
+        ));
     }
 
     #[test]
@@ -615,8 +617,14 @@ mod tests {
         for n in 0..MAX_PENDING {
             assert!(store.put(attempt(n)));
         }
-        assert!(!store.put(attempt(MAX_PENDING)), "the map grows with every request");
-        assert!(store.take("state-0").is_some(), "a refused attempt pushed a live one out");
+        assert!(
+            !store.put(attempt(MAX_PENDING)),
+            "the map grows with every request"
+        );
+        assert!(
+            store.take("state-0").is_some(),
+            "a refused attempt pushed a live one out"
+        );
     }
 
     #[test]

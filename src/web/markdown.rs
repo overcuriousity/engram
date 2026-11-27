@@ -226,8 +226,12 @@ mod tests {
     #[test]
     fn written_content_cannot_borrow_the_apps_own_classes() {
         // A captured page or a model can write raw HTML; the app's classes position and hide.
-        let html = render("<div class=\"oc-fab menu\">Sign in again</div>\n\n<p class=\"hidden\">x</p>");
-        assert!(!html.contains("oc-fab") && !html.contains("hidden"), "{html}");
+        let html =
+            render("<div class=\"oc-fab menu\">Sign in again</div>\n\n<p class=\"hidden\">x</p>");
+        assert!(
+            !html.contains("oc-fab") && !html.contains("hidden"),
+            "{html}"
+        );
         assert!(html.contains("Sign in again"));
         let code = render("```rust\nfn main() {}\n```");
         assert!(code.contains("class=\"language-rust\""), "{code}");

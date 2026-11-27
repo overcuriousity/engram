@@ -187,18 +187,29 @@ mod tests {
         let notify = || async { core.store.control.notify("user-1").await.unwrap() };
         assert_eq!(
             endpoints(&notify().await),
-            ["https://push.example/up/phone", "https://push.example/up/tablet"],
+            [
+                "https://push.example/up/phone",
+                "https://push.example/up/tablet"
+            ],
             "the second phone took the first one's place"
         );
 
         // Unpairing one phone takes its own registration and no other.
         let res = app
             .clone()
-            .oneshot(req("DELETE", "/api/v1/push/unifiedpush", Some(&first), None))
+            .oneshot(req(
+                "DELETE",
+                "/api/v1/push/unifiedpush",
+                Some(&first),
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        assert_eq!(endpoints(&notify().await), ["https://push.example/up/tablet"]);
+        assert_eq!(
+            endpoints(&notify().await),
+            ["https://push.example/up/tablet"]
+        );
 
         // A revoked token's phone is no longer pushed to.
         crate::auth::tokens::revoke(&core.store.control, &second_row.id, "user-1")

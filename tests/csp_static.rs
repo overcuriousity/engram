@@ -544,7 +544,10 @@ fn a_release_follows_only_a_push_to_this_repository() {
 #[test]
 fn vendoring_keeps_what_the_archive_already_holds() {
     for path in [".github/workflows/release.yml", "scripts/bundle.sh"] {
-        for line in tracked(path).lines().filter(|l| l.contains("cargo vendor ")) {
+        for line in tracked(path)
+            .lines()
+            .filter(|l| l.contains("cargo vendor "))
+        {
             assert!(line.contains("--no-delete"), "{path}: {}", line.trim());
         }
     }

@@ -797,7 +797,10 @@ impl Control {
     }
 
     /// One claimed row; the job is `None` where its stage name does not parse.
-    async fn claim_row(&self, held: &[Stage]) -> Result<Option<(String, i64, String, Option<Job>)>> {
+    async fn claim_row(
+        &self,
+        held: &[Stage],
+    ) -> Result<Option<(String, i64, String, Option<Job>)>> {
         let except = if held.is_empty() {
             String::new()
         } else {
@@ -873,7 +876,7 @@ impl Control {
             err,
             id
         )
-            .execute(&self.pool)
+        .execute(&self.pool)
         .await?;
         Ok(())
     }
@@ -1621,17 +1624,26 @@ mod tests {
     #[tokio::test]
     async fn a_unit_given_up_on_for_now_is_not_a_capture_being_read() {
         let s = Store::memory().await.unwrap();
-        s.enqueue(Stage::SegmentWindow, "segment", "c-1#0").await.unwrap();
+        s.enqueue(Stage::SegmentWindow, "segment", "c-1#0")
+            .await
+            .unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
         s.fail_job(j.id, 1, "endpoint down").await.unwrap();
-        assert!(s.capture_being_read().await.unwrap(), "a first retry is still reading");
+        assert!(
+            s.capture_being_read().await.unwrap(),
+            "a first retry is still reading"
+        );
 
         // Every attempt spent: it waits hours at the ceiling, and the line would say reading
         // for as long as the model keeps refusing.
-        sqlx::query!("UPDATE jobs SET attempts = ? WHERE id = ?", MAX_ATTEMPTS, j.id)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET attempts = ? WHERE id = ?",
+            MAX_ATTEMPTS,
+            j.id
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
         assert!(!s.capture_being_read().await.unwrap());
     }
 
@@ -2052,10 +2064,13 @@ mod tests {
     }
 
     async fn row_state(s: &Store, id: i64) -> (String, i64, i64) {
-        let r = sqlx::query!("SELECT state, attempts, run_after FROM jobs WHERE id = ?", id)
-            .fetch_one(&s.control.pool)
-            .await
-            .unwrap();
+        let r = sqlx::query!(
+            "SELECT state, attempts, run_after FROM jobs WHERE id = ?",
+            id
+        )
+        .fetch_one(&s.control.pool)
+        .await
+        .unwrap();
         (r.state, r.attempts, r.run_after)
     }
 
@@ -2070,7 +2085,12 @@ mod tests {
             .unwrap();
         s.enqueue(Stage::Embed, "artifact", "a-2").await.unwrap();
 
-        let (_, got) = s.control.claim_job().await.unwrap().expect("the known unit");
+        let (_, got) = s
+            .control
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("the known unit");
         assert_eq!((got.stage, got.target_id.as_str()), (Stage::Embed, "a-2"));
         let parked = sqlx::query!(
             "SELECT state, run_after, last_error FROM jobs WHERE stage = 'from-a-newer-build'"
@@ -2106,8 +2126,15 @@ mod tests {
 
         s.complete_job(j.id).await.unwrap();
 
-        assert_eq!(row_state(&s, j.id).await.0, "pending", "the new arming was closed");
-        assert!(s.claim_job().await.unwrap().is_some(), "and nobody runs it again");
+        assert_eq!(
+            row_state(&s, j.id).await.0,
+            "pending",
+            "the new arming was closed"
+        );
+        assert!(
+            s.claim_job().await.unwrap().is_some(),
+            "and nobody runs it again"
+        );
     }
 
     #[tokio::test]
@@ -2128,7 +2155,11 @@ mod tests {
         let s = Store::memory().await.unwrap();
         s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
-        assert_eq!(s.control.reclaim_stuck(600).await.unwrap(), 0, "too fresh for the age check");
+        assert_eq!(
+            s.control.reclaim_stuck(600).await.unwrap(),
+            0,
+            "too fresh for the age check"
+        );
 
         assert_eq!(s.control.reclaim_orphans().await.unwrap(), 1);
         assert_eq!(row_state(&s, j.id).await.0, "pending");
@@ -2139,10 +2170,14 @@ mod tests {
         let s = Store::memory().await.unwrap();
         s.enqueue(Stage::Embed, "artifact", "a-1").await.unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
-        sqlx::query!("UPDATE jobs SET claimed_at = ? WHERE id = ?", now() - 3600, j.id)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET claimed_at = ? WHERE id = ?",
+            now() - 3600,
+            j.id
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
 
         s.control.beat(j.id).await.unwrap();
 

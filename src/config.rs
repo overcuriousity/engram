@@ -2660,9 +2660,15 @@ mod tests {
         cfg.auth.mode = AuthMode::Local;
         assert!(cfg.fetch_reaches_private());
         cfg.auth.mode = AuthMode::Oidc;
-        assert!(!cfg.fetch_reaches_private(), "any signed-in user reads the server's network");
+        assert!(
+            !cfg.fetch_reaches_private(),
+            "any signed-in user reads the server's network"
+        );
         cfg.capture.fetch_private = Some(true);
-        assert!(cfg.fetch_reaches_private(), "the operator's own word is overruled");
+        assert!(
+            cfg.fetch_reaches_private(),
+            "the operator's own word is overruled"
+        );
         cfg.auth.mode = AuthMode::Local;
         cfg.capture.fetch_private = Some(false);
         assert!(!cfg.fetch_reaches_private());
